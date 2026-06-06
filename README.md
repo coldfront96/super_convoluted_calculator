@@ -1,8 +1,8 @@
 # 🏛️ The Super Convoluted Calculator
 
-A calculator that computes `1 + 2 = 3` — **correctly, every time** — by way of a
-ten-language pipeline, a virtual machine whose ALU is built from individual logic
-gates, four independent execution engines, and a Byzantine consensus vote.
+A calculator that computes `1 + 2 = 3` — **correctly, every time** — by way of an
+eleven-language pipeline, a virtual machine whose ALU is built from individual
+logic gates, five independent execution engines, and a Byzantine quorum vote.
 
 It is deliberately, proudly, *unnecessarily* complicated. The only sacred rule is
 that the answer must always be right. See [`HARD_RULES.md`](HARD_RULES.md) for the
@@ -33,18 +33,38 @@ can pipe it). Add `--report` for the full multi-representation render.
 | 2 | **Python** | recursive-descent parser | JSON AST |
 | 3 | **Ruby** | compiler → stack bytecode | base64 |
 | — | **base64** | transport decode | bytecode |
-| 4 | **C / Rust / Go / Java** | four independent VMs | one integer each |
-| 5 | **awk** | Byzantine consensus (unanimity or panic) | the verdict |
+| 4 | **C / Rust / Go / Java / Bash** | five independent VMs | one integer each |
+| 5 | **awk** | Byzantine quorum (strict majority or panic) | the verdict |
 | 6 | **Node** | render decimal/hex/binary/Roman/English + cross-verify | JSON |
 | — | **jq** | extract the headline answer | the number |
 
 That's **bash, Perl, Python, Ruby, C, Rust, Go, Java, Node/JS, awk** on the
 critical path, with `base64`, `jq`, and `make` as accomplices.
 
+## Byzantine quorum (why five engines?)
+
+So they can **vote**, and tolerate a traitor. Each engine runs the same bytecode
+independently. The awk consensus stage accepts a value only if it holds a *strict
+majority* — so a single lying engine cannot change the answer, it can only get
+itself outvoted and named in the log. You can prove this on the real path:
+
+```sh
+$ CALC_TRAITOR=99999999 ./calc "1 + 2"
+  ...
+  consensus: Byzantine dissent detected; majority prevails (5/6)
+  consensus: traitor vote ignored -> 99999999
+3
+```
+
+Four of the five engines (C, Rust, Go, Bash) build all arithmetic from logic
+gates. The fifth (**Java**) is the "sane oracle" using boring `long` math purely
+so it *could* disagree with the lunatics. It never does.
+
 ## The crown jewel: arithmetic from NAND gates
 
-Three of the four engines (C, Rust, Go) compute nothing with the native `+` or
-`*`. Instead they build everything from a single primitive — the **NAND gate**:
+Four of the five engines (C, Rust, Go, Bash) compute nothing with the native `+`
+or `*`. Instead they build everything from logic gates — the C/Rust/Go engines
+from a single **NAND** primitive:
 
 ```
 NAND ─► NOT, AND, OR, XOR ─► full adder ─► 64-bit ripple-carry adder
@@ -104,6 +124,7 @@ engines/
   engine_rust.rs        # Rust — gate-level VM (engine B)
   engine_go/main.go     # Go   — gate-level VM (engine C)
   Engine.java           # Java — the sane oracle (engine D)
+  engine_bash.sh        # Bash — gate-level VM (engine E, slowest & proudest)
 tests/
   reference.py          # independent oracle of truth
   run_tests.sh          # the test suite

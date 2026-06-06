@@ -37,6 +37,17 @@ while IFS=$'\t' read -r e v; do
     check "$e" "$v"
 done < <(python3 "$REF" --gen 250)
 
+echo ">> Byzantine quorum: a single traitor must be outvoted..."
+traitor_err="$(mktemp)"
+traitor_out="$(CALC_TRAITOR=99999999 "$CALC" "1 + 2" 2>"$traitor_err")"
+if [[ "$traitor_out" == "3" ]] && grep -q "traitor vote ignored" "$traitor_err"; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: traitor injection — out='$traitor_out' (expected 3, with traitor named)"
+fi
+rm -f "$traitor_err"
+
 echo ">> division-by-zero contract..."
 if "$CALC" "1 / 0" >/dev/null 2>&1; then
     echo "FAIL: '1 / 0' should exit non-zero"
