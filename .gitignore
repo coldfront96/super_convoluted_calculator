@@ -1,0 +1,5 @@
+build/
+*.class
+*.o
+.calc_work/
+engines/engine_go/engine_go

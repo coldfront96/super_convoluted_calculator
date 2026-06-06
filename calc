@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# ============================================================================
+# THE ORCHESTRATOR  (language: Bash)
+# ----------------------------------------------------------------------------
+# Conducts the entire polyglot cathedral for a single arithmetic expression:
+#
+#   Perl lexer -> Python parser -> Ruby compiler -> base64 transport
+#   -> {C, Rust, Go, Java} engines -> awk Byzantine consensus
+#   -> Node renderer -> jq extraction
+#
+# stdout: the headline decimal answer (or, with --report, the full JSON render).
+# stderr: pompous ceremony narrating every stage.
+#
+# Usage:  ./calc "1 + 2 * (3 - 4)"
+#         ./calc --report "6 * 7"
+# ============================================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD="$HERE/build"
+
+# ---- argument parsing ----
+REPORT=0
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --report|-r) REPORT=1 ;;
+        --quiet|-q)  exec 2>/dev/null ;;
+        *)           ARGS+=("$a") ;;
+    esac
+done
+EXPR="${ARGS[*]:-}"
+if [[ -z "${EXPR// }" ]]; then
+    echo "usage: calc [--report] \"<expression>\"" >&2
+    exit 64
+fi
+
+step() { printf '  \033[2m·\033[0m \033[2m%s\033[0m\n' "$*" >&2; }
+banner() { printf '\033[1m%s\033[0m\n' "$*" >&2; }
+
+# ---- ensure the engines are built ----
+need_build=0
+for artifact in engine_c engine_rust engine_go Engine.class; do
+    [[ -e "$BUILD/$artifact" ]] || need_build=1
+done
+if [[ $need_build -eq 1 ]]; then
+    step "engines missing; invoking make..."
+    make -C "$HERE" all >&2
+fi
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/calc.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+banner "SUPER CONVOLUTED CALCULATOR — evaluating: $EXPR"
+
+# ---- STAGE 1: Perl lexer -> CSV ----
+step "stage 1/6  [perl]   lexing into CSV tokens"
+perl "$HERE/pipeline/01_lexer.pl" "$EXPR" > "$WORK/tokens.csv"
+
+# ---- STAGE 2: Python parser -> AST JSON ----
+step "stage 2/6  [python] parsing CSV into an AST"
+python3 "$HERE/pipeline/02_parser.py" < "$WORK/tokens.csv" > "$WORK/ast.json"
+
+# ---- STAGE 3: Ruby compiler -> base64 bytecode ----
+step "stage 3/6  [ruby]   compiling AST to base64 bytecode"
+ruby "$HERE/pipeline/03_compiler.rb" < "$WORK/ast.json" > "$WORK/program.b64"
+
+# ---- transport: decode the base64 into runnable bytecode ----
+base64 -d "$WORK/program.b64" > "$WORK/program.bytecode"
+
+# ---- STAGE 4: four independent engines execute the same bytecode ----
+step "stage 4/6  [c/rust/go/java] running four independent engines"
+r_c="$(   "$BUILD/engine_c"    "$WORK/program.bytecode")"
+r_rust="$("$BUILD/engine_rust" "$WORK/program.bytecode")"
+r_go="$(  "$BUILD/engine_go"   "$WORK/program.bytecode")"
+r_java="$(java -cp "$BUILD" Engine "$WORK/program.bytecode")"
+step "          C=$r_c  Rust=$r_rust  Go=$r_go  Java=$r_java"
+
+# ---- STAGE 5: awk Byzantine consensus ----
+step "stage 5/6  [awk]    tallying Byzantine consensus"
+if ! verdict="$(printf '%s\n%s\n%s\n%s\n' "$r_c" "$r_rust" "$r_go" "$r_java" \
+                | awk -f "$HERE/pipeline/consensus.awk")"; then
+    echo "FATAL: the engines could not agree. Refusing to answer." >&2
+    exit 9
+fi
+
+if [[ "$verdict" == "ERR:DIVZERO" ]]; then
+    echo "Error: division by zero is undefined." >&2
+    exit 3
+fi
+
+# ---- STAGE 6: Node renderer + jq extraction ----
+step "stage 6/6  [node]   rendering & cross-verifying representations"
+render="$(node "$HERE/pipeline/09_renderer.js" "$verdict")"
+
+banner "CONSENSUS REACHED: $verdict"
+
+if [[ $REPORT -eq 1 ]]; then
+    echo "$render" | jq .
+else
+    echo "$render" | jq -r .decimal
+fi
