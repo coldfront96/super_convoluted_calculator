@@ -12,11 +12,11 @@
 
 const value = BigInt(process.argv[2]);
 
-// ---- two's-complement views ----
-const TWO64 = 1n << 64n;
-const u = ((value % TWO64) + TWO64) % TWO64;
-const hex = '0x' + u.toString(16);
-const binary = u.toString(2).padStart(64, '0');
+// ---- sign-magnitude views (arbitrary precision) ----
+const mag = value < 0n ? -value : value;
+const sgn = value < 0n ? '-' : '';
+const hex = sgn + '0x' + mag.toString(16);
+const binary = sgn + mag.toString(2);
 
 // ---- Roman numerals (classical range 1..3999) ----
 function toRoman(n) {
@@ -70,6 +70,7 @@ function toWords(n) {
   let x = neg ? -n : n;
   const groups = [];
   while (x > 0n) { groups.push(Number(x % 1000n)); x /= 1000n; }
+  if (groups.length > SCALES.length) return null; // beyond our naming scheme
   const parts = [];
   for (let i = groups.length - 1; i >= 0; i--) {
     if (groups[i] === 0) continue;
@@ -103,7 +104,7 @@ const words = toWords(value);
 const roman = toRoman(value);
 
 let verified = true;
-if (fromWords(words) !== value) verified = false;
+if (words !== null && fromWords(words) !== value) verified = false;
 if (roman !== null && fromRoman(roman) !== value) verified = false;
 
 if (!verified) {

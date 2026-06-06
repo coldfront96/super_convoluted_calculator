@@ -86,10 +86,31 @@ which is the whole joke.
 
 ## Semantics
 
-64-bit signed integers, two's-complement, wrapping overflow, division truncating
-toward zero — identical across all four engines. Supports `+ - * / %`,
-parentheses, and unary minus with correct precedence. Division by zero is
-detected and reported as an error (exit code 3).
+**Arbitrary-precision** signed integers, division truncating toward zero,
+remainder taking the dividend's sign. Supports `+ - * / %`, parentheses, and
+unary minus with correct precedence. Division by zero is detected and reported
+(exit code 3).
+
+The four big engines (C, Rust, Go, Java) are genuinely unbounded. Each gate
+engine builds bignum arithmetic as a third layer **on top of** its 64-bit gate
+ALU: `NAND → 64-bit ALU → base-2³² bignum`. Limb additions go through the gate
+adder; limb products through the gate multiplier; division is binary long
+division. Java uses `BigInteger` (the sane oracle).
+
+The Bash engine remains a **bounded 64-bit** gate engine. When a result fits in
+64 bits, all five agree. When it overflows, Bash produces a wrapped (wrong)
+value, becomes a lone dissenter, and the four bignum engines outvote it 4-to-1:
+
+```sh
+$ ./calc "1000000000000000000 * 1000000000000000000"
+  ...
+  C=10^36  Rust=10^36  Go=10^36  Java=10^36  Bash=-5527149226598858752
+  consensus: Byzantine dissent detected; majority prevails (4/5)
+1000000000000000000000000000000000000
+```
+
+This is the point: the Byzantine quorum from Feature 1 is now genuinely
+load-bearing — it exists precisely to tolerate the bounded engine's overflow.
 
 ## Usage
 

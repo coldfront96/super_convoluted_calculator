@@ -30,8 +30,10 @@ Same input → same correct output, every time. No randomness in the answer.
 
 ## Rule 6 — It stays a calculator
 Real expression in, real answer out. Supports `+ - * / %`, parentheses, unary
-minus, and integer precedence. 64-bit signed integer semantics (two's complement,
-wrapping overflow, division truncates toward zero) — identical across all engines.
+minus, and integer precedence. Arbitrary-precision signed integer semantics
+(division truncates toward zero; remainder takes the dividend's sign) across the
+four bignum engines. The Bash engine is a bounded 64-bit gate engine that the
+Byzantine quorum outvotes whenever a result overflows 64 bits.
 
 ## Rule 7 — Maximize convolution within Rules 1–6
 Subject to everything above, make it as unnecessarily complicated as humanly

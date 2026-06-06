@@ -37,6 +37,11 @@ while IFS=$'\t' read -r e v; do
     check "$e" "$v"
 done < <(python3 "$REF" --gen 250)
 
+echo ">> 120 BIG (arbitrary-precision) cases — Bash overflows & is outvoted..."
+while IFS=$'\t' read -r e v; do
+    check "$e" "$v"
+done < <(python3 "$REF" --gen-big 120)
+
 echo ">> Byzantine quorum: a single traitor must be outvoted..."
 traitor_err="$(mktemp)"
 traitor_out="$(CALC_TRAITOR=99999999 "$CALC" "1 + 2" 2>"$traitor_err")"

@@ -4,24 +4,18 @@
 # ----------------------------------------------------------------------------
 # A standalone, deliberately simple evaluator used only by the test suite to
 # decide what the correct answer IS. It mirrors the calculator's semantics:
-# 64-bit signed two's-complement, wrapping overflow, division truncating toward
-# zero. If `calc` ever disagrees with this oracle, HARD_RULES #1 is broken.
+# arbitrary-precision signed integers, division truncating toward zero, and a
+# remainder that takes the dividend's sign. If `calc` ever disagrees with this
+# oracle, HARD_RULES #1 is broken.
 #
 # Modes:
-#   reference.py "<expr>"     -> print the correct 64-bit answer
+#   reference.py "<expr>"     -> print the correct answer
 #   reference.py --cases      -> emit curated  "expr\tanswer" lines
 #   reference.py --gen N      -> emit N random "expr\tanswer" lines
+#   reference.py --gen-big N  -> emit N random BIG "expr\tanswer" lines
 # ============================================================================
 import sys
 import random
-
-M = 1 << 64
-
-
-def w(x):
-    """Wrap to signed 64-bit two's complement."""
-    x %= M
-    return x - M if x >= (1 << 63) else x
 
 
 def _trunc_div(a, b):
@@ -31,21 +25,21 @@ def _trunc_div(a, b):
     return q
 
 
-def ev_add(a, b): return w(a + b)
-def ev_sub(a, b): return w(a - b)
-def ev_mul(a, b): return w(a * b)
+def ev_add(a, b): return a + b
+def ev_sub(a, b): return a - b
+def ev_mul(a, b): return a * b
 
 
 def ev_div(a, b):
     if b == 0:
         raise ZeroDivisionError
-    return w(_trunc_div(a, b))
+    return _trunc_div(a, b)
 
 
 def ev_mod(a, b):
     if b == 0:
         raise ZeroDivisionError
-    return w(a - _trunc_div(a, b) * b)
+    return a - _trunc_div(a, b) * b
 
 
 # ---- a tiny independent recursive-descent evaluator ----
@@ -82,7 +76,7 @@ class P:
         c = self.peek()
         if c == '-':
             self.i += 1
-            return w(-self.factor())
+            return -self.factor()
         if c == '+':
             self.i += 1
             return self.factor()
@@ -97,7 +91,7 @@ class P:
         start = self.i
         while self.i < len(self.s) and self.s[self.i].isdigit():
             self.i += 1
-        return w(int(self.s[start:self.i]))
+        return int(self.s[start:self.i])
 
 
 def evaluate(expr):
@@ -117,6 +111,21 @@ def gen_expr(rng, depth=0):
     if rng.random() < 0.2:
         expr = "-" + expr
     return expr
+
+
+def gen_big_expr(rng, depth=0):
+    if depth >= 3 or rng.random() < 0.45:
+        # numbers that comfortably exceed 64 bits
+        digits = rng.randint(15, 40)
+        n = rng.randint(10 ** (digits - 1), 10 ** digits)
+        return ("-" if rng.random() < 0.3 else "") + str(n)
+    op = rng.choice(['+', '-', '*', '/', '%'])
+    left = gen_big_expr(rng, depth + 1)
+    right = gen_big_expr(rng, depth + 1)
+    if op in '/%':
+        d = rng.randint(10 ** 14, 10 ** 30)
+        right = ("-" if rng.random() < 0.3 else "") + str(d)
+    return f"({left} {op} {right})"
 
 
 CURATED = [
@@ -142,6 +151,15 @@ CURATED = [
     "999999999 + 1",
     "1 + 2 * 3 - 4 / 2",
     "(10 - 2) % (1 + 2)",
+    # ---- arbitrary precision: results far beyond 64 bits ----
+    "1000000000000000000 * 1000000000000000000",
+    "2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2",
+    "123456789012345678901234567890 + 987654321098765432109876543210",
+    "99999999999999999999 * 99999999999999999999",
+    "(10000000000000000000000000000000000000000 / 7)",
+    "(10000000000000000000000000000000000000000 % 7)",
+    "-123456789012345678901234567890 * 2",
+    "1000000000000000000000000000000 - 1",
 ]
 
 
@@ -150,12 +168,13 @@ def main():
         for e in CURATED:
             print(f"{e}\t{evaluate(e)}")
         return
-    if len(sys.argv) >= 3 and sys.argv[1] == "--gen":
+    if len(sys.argv) >= 3 and sys.argv[1] in ("--gen", "--gen-big"):
+        big = sys.argv[1] == "--gen-big"
         n = int(sys.argv[2])
-        rng = random.Random(1337)  # deterministic test corpus
+        rng = random.Random(1337 if not big else 4242)  # deterministic corpus
         emitted = 0
         while emitted < n:
-            e = gen_expr(rng)
+            e = gen_big_expr(rng) if big else gen_expr(rng)
             try:
                 v = evaluate(e)
             except ZeroDivisionError:

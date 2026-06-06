@@ -1,21 +1,21 @@
 // ===========================================================================
 // ENGINE C of the cathedral: THE GATE-LEVEL VM, YET AGAIN  (language: Go)
 // ---------------------------------------------------------------------------
-// Third independent gate-level engine. Addition/subtraction go through the same
-// NAND-built ripple-carry adder, but multiplication here uses the Russian
-// peasant method (halving/doubling) for variety. Reads bytecode from os.Args[1],
-// prints top of stack as a signed 64-bit integer.
+// Third independent gate engine: a 64-bit ALU built from NAND, plus an
+// arbitrary-precision integer type built on top of it (base-2^32 limbs).
+// Multiplication of limbs goes through the Russian-peasant-flavoured gate
+// multiplier. Native +/* never compute the answer; shifts/indexing are plumbing.
+// Reads bytecode from os.Args[1] (or stdin), prints top of stack in decimal.
 // ===========================================================================
 package main
 
 import (
 	"bufio"
-	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
+// ---- LAYER 1+2: gates and 64-bit ALU ----
 func nand(a, b int) int {
 	if a&b != 0 {
 		return 0
@@ -26,19 +26,17 @@ func not(a int) int    { return nand(a, a) }
 func and(a, b int) int { return not(nand(a, b)) }
 func or(a, b int) int  { return nand(not(a), not(b)) }
 func xor(a, b int) int { t := nand(a, b); return nand(nand(a, t), nand(b, t)) }
-
-func fullAdder(a, b, c int) (int, int) {
+func fa(a, b, c int) (int, int) {
 	axb := xor(a, b)
 	return xor(axb, c), or(and(axb, c), and(a, b))
 }
+func bit64(x uint64, i uint) int { return int((x >> i) & 1) }
 
-func bit(x uint64, i uint) int { return int((x >> i) & 1) }
-
-func addC(a, b uint64, cin int) (uint64, int) {
+func gaddc(a, b uint64, cin int) (uint64, int) {
 	var r uint64
 	c := cin
 	for i := uint(0); i < 64; i++ {
-		s, co := fullAdder(bit(a, i), bit(b, i), c)
+		s, co := fa(bit64(a, i), bit64(b, i), c)
 		if s == 1 {
 			r |= 1 << i
 		}
@@ -46,68 +44,364 @@ func addC(a, b uint64, cin int) (uint64, int) {
 	}
 	return r, c
 }
-func add(a, b uint64) uint64 { r, _ := addC(a, b, 0); return r }
-func notw(a uint64) uint64 {
+func gadd(a, b uint64) uint64 { r, _ := gaddc(a, b, 0); return r }
+func gnotw(a uint64) uint64 {
 	var r uint64
 	for i := uint(0); i < 64; i++ {
-		if not(bit(a, i)) == 1 {
+		if not(bit64(a, i)) == 1 {
 			r |= 1 << i
 		}
 	}
 	return r
 }
-func neg(a uint64) uint64    { return add(notw(a), 1) }
-func sub(a, b uint64) uint64 { return add(a, neg(b)) }
-func uge(a, b uint64) bool   { _, c := addC(a, notw(b), 1); return c == 1 }
-
-// Russian peasant multiplication: a different road to the same product.
-func mul(a, b uint64) uint64 {
+func gneg(a uint64) uint64    { return gadd(gnotw(a), 1) }
+func gsub(a, b uint64) uint64 { return gadd(a, gneg(b)) }
+func guge(a, b uint64) bool   { _, c := gaddc(a, gnotw(b), 1); return c == 1 }
+func gmul(a, b uint64) uint64 {
 	var r uint64
 	for b != 0 {
 		if b&1 == 1 {
-			r = add(r, a)
+			r = gadd(r, a)
 		}
 		a <<= 1
 		b >>= 1
 	}
 	return r
 }
-
-func udivmod(num, den uint64) (uint64, uint64) {
+func gudivmod64(num, den uint64) (uint64, uint64) {
 	var q, r uint64
 	for i := 63; i >= 0; i-- {
 		r = (r << 1) | ((num >> uint(i)) & 1)
-		if uge(r, den) {
-			r = sub(r, den)
+		if guge(r, den) {
+			r = gsub(r, den)
 			q |= 1 << uint(i)
 		}
 	}
 	return q, r
 }
 
-func isNeg(a uint64) bool { return bit(a, 63) == 1 }
+// ---- LAYER 3: bignum on the 64-bit gate ALU ----
+type Big struct {
+	sign int      // -1, 0, 1
+	d    []uint32 // little-endian magnitude, no trailing zeros
+}
 
-func sdivmod(a, b uint64) (uint64, uint64, bool) {
-	if b == 0 {
-		return 0, 0, false
+func zero() Big { return Big{0, nil} }
+
+func (x *Big) norm() {
+	for len(x.d) > 0 && x.d[len(x.d)-1] == 0 {
+		x.d = x.d[:len(x.d)-1]
 	}
-	na, nb := isNeg(a), isNeg(b)
-	ua, ub := a, b
-	if na {
-		ua = neg(a)
+	if len(x.d) == 0 {
+		x.sign = 0
 	}
-	if nb {
-		ub = neg(b)
+}
+func (x Big) clone() Big {
+	d := make([]uint32, len(x.d))
+	copy(d, x.d)
+	return Big{x.sign, d}
+}
+
+func cmpAbs(a, b Big) int {
+	if len(a.d) != len(b.d) {
+		if len(a.d) < len(b.d) {
+			return -1
+		}
+		return 1
 	}
-	uq, ur := udivmod(ua, ub)
-	q, r := uq, ur
-	if na != nb {
-		q = neg(uq)
+	for i := len(a.d) - 1; i >= 0; i-- {
+		if a.d[i] != b.d[i] {
+			if a.d[i] < b.d[i] {
+				return -1
+			}
+			return 1
+		}
 	}
-	if na {
-		r = neg(ur)
+	return 0
+}
+
+func addAbs(a, b Big) Big {
+	n := len(a.d)
+	if len(b.d) > n {
+		n = len(b.d)
+	}
+	d := make([]uint32, 0, n+1)
+	var carry uint64
+	for i := 0; i < n; i++ {
+		var av, bv uint64
+		if i < len(a.d) {
+			av = uint64(a.d[i])
+		}
+		if i < len(b.d) {
+			bv = uint64(b.d[i])
+		}
+		s := gadd(gadd(av, bv), carry)
+		d = append(d, uint32(s&0xffffffff))
+		carry = s >> 32
+	}
+	if carry != 0 {
+		d = append(d, uint32(carry))
+	}
+	r := Big{1, d}
+	r.norm()
+	return r
+}
+
+func subAbs(a, b Big) Big { // requires |a| >= |b|
+	d := make([]uint32, 0, len(a.d))
+	var borrow uint64
+	for i := 0; i < len(a.d); i++ {
+		av := uint64(a.d[i])
+		var bv uint64
+		if i < len(b.d) {
+			bv = uint64(b.d[i])
+		}
+		s := gsub(gsub(av, bv), borrow)
+		d = append(d, uint32(s&0xffffffff))
+		if (s >> 32) != 0 {
+			borrow = 1
+		} else {
+			borrow = 0
+		}
+	}
+	r := Big{1, d}
+	r.norm()
+	return r
+}
+
+func bigAdd(a, b Big) Big {
+	if a.sign == 0 {
+		return b.clone()
+	}
+	if b.sign == 0 {
+		return a.clone()
+	}
+	if a.sign == b.sign {
+		r := addAbs(a, b)
+		if len(r.d) != 0 {
+			r.sign = a.sign
+		}
+		return r
+	}
+	c := cmpAbs(a, b)
+	if c == 0 {
+		return zero()
+	}
+	var r Big
+	if c > 0 {
+		r = subAbs(a, b)
+		r.sign = a.sign
+	} else {
+		r = subAbs(b, a)
+		r.sign = b.sign
+	}
+	if len(r.d) == 0 {
+		r.sign = 0
+	}
+	return r
+}
+func bigNeg(a Big) Big { r := a.clone(); r.sign = -r.sign; return r }
+func bigSub(a, b Big) Big { return bigAdd(a, bigNeg(b)) }
+
+func bigMul(a, b Big) Big {
+	if a.sign == 0 || b.sign == 0 {
+		return zero()
+	}
+	d := make([]uint32, len(a.d)+len(b.d))
+	for i := 0; i < len(a.d); i++ {
+		var carry uint64
+		for j := 0; j < len(b.d); j++ {
+			prod := gmul(uint64(a.d[i]), uint64(b.d[j]))
+			cur := uint64(d[i+j])
+			s := gadd(gadd(prod, cur), carry)
+			d[i+j] = uint32(s & 0xffffffff)
+			carry = s >> 32
+		}
+		k := i + len(b.d)
+		for carry != 0 {
+			s := gadd(uint64(d[k]), carry)
+			d[k] = uint32(s & 0xffffffff)
+			carry = s >> 32
+			k++
+		}
+	}
+	sign := 1
+	if a.sign != b.sign {
+		sign = -1
+	}
+	r := Big{sign, d}
+	r.norm()
+	return r
+}
+
+func shl1(x *Big) {
+	var carry uint32
+	for i := 0; i < len(x.d); i++ {
+		nv := (x.d[i] << 1) | carry
+		carry = x.d[i] >> 31
+		x.d[i] = nv
+	}
+	if carry != 0 {
+		x.d = append(x.d, carry)
+	}
+}
+
+func udiv(a, b Big) (Big, Big) {
+	q := zero()
+	r := zero()
+	bits := len(a.d) * 32
+	for p := bits - 1; p >= 0; p-- {
+		shl1(&r)
+		abit := (a.d[p>>5] >> uint(p&31)) & 1
+		if abit == 1 {
+			if len(r.d) == 0 {
+				r.d = append(r.d, 1)
+			} else {
+				r.d[0] |= 1
+			}
+		}
+		r.norm()
+		if cmpAbs(r, b) >= 0 {
+			r = subAbs(r, b)
+			w := p >> 5
+			for len(q.d) <= w {
+				q.d = append(q.d, 0)
+			}
+			q.d[w] |= 1 << uint(p&31)
+		}
+	}
+	q.sign = 1
+	r.sign = 1
+	q.norm()
+	r.norm()
+	return q, r
+}
+
+func bigDivmod(a, b Big) (Big, Big, bool) {
+	if b.sign == 0 {
+		return zero(), zero(), false
+	}
+	aa := a.clone()
+	if len(aa.d) != 0 {
+		aa.sign = 1
+	}
+	bb := b.clone()
+	bb.sign = 1
+	q, r := udiv(aa, bb)
+	if len(q.d) == 0 {
+		q.sign = 0
+	} else if a.sign == b.sign {
+		q.sign = 1
+	} else {
+		q.sign = -1
+	}
+	if len(r.d) == 0 {
+		r.sign = 0
+	} else {
+		r.sign = a.sign
 	}
 	return q, r, true
+}
+
+func mulSmall(x *Big, m uint32) {
+	var carry uint64
+	for i := 0; i < len(x.d); i++ {
+		s := gadd(gmul(uint64(x.d[i]), uint64(m)), carry)
+		x.d[i] = uint32(s & 0xffffffff)
+		carry = s >> 32
+	}
+	for carry != 0 {
+		x.d = append(x.d, uint32(carry&0xffffffff))
+		carry >>= 32
+	}
+	if len(x.d) != 0 && x.sign == 0 {
+		x.sign = 1
+	}
+	x.norm()
+}
+func addSmall(x *Big, a uint32) {
+	carry := uint64(a)
+	i := 0
+	for carry != 0 {
+		var cur uint64
+		if i < len(x.d) {
+			cur = uint64(x.d[i])
+		}
+		s := gadd(cur, carry)
+		if i >= len(x.d) {
+			x.d = append(x.d, 0)
+		}
+		x.d[i] = uint32(s & 0xffffffff)
+		carry = s >> 32
+		i++
+	}
+	if len(x.d) != 0 && x.sign == 0 {
+		x.sign = 1
+	}
+	x.norm()
+}
+func fromDec(s string) Big {
+	r := zero()
+	neg := false
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
+		neg = s[0] == '-'
+		s = s[1:]
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			continue
+		}
+		mulSmall(&r, 10)
+		addSmall(&r, uint32(c-'0'))
+	}
+	if len(r.d) == 0 {
+		r.sign = 0
+	} else if neg {
+		r.sign = -1
+	} else {
+		r.sign = 1
+	}
+	return r
+}
+func toDec(x Big) string {
+	if x.sign == 0 {
+		return "0"
+	}
+	t := x.clone()
+	t.sign = 1
+	var buf []byte
+	for len(t.d) > 0 {
+		var rem uint64
+		for i := len(t.d) - 1; i >= 0; i-- {
+			cur := (rem << 32) | uint64(t.d[i])
+			q, r := gudivmod64(cur, 1000000000)
+			t.d[i] = uint32(q)
+			rem = r
+		}
+		t.norm()
+		if len(t.d) > 0 {
+			for k := 0; k < 9; k++ {
+				q, r := gudivmod64(rem, 10)
+				buf = append(buf, byte('0'+r))
+				rem = q
+			}
+		} else {
+			for rem > 0 {
+				q, r := gudivmod64(rem, 10)
+				buf = append(buf, byte('0'+r))
+				rem = q
+			}
+		}
+	}
+	var sb strings.Builder
+	if x.sign < 0 {
+		sb.WriteByte('-')
+	}
+	for i := len(buf) - 1; i >= 0; i-- {
+		sb.WriteByte(buf[i])
+	}
+	return sb.String()
 }
 
 func main() {
@@ -115,7 +409,7 @@ func main() {
 	if len(os.Args) > 1 {
 		f, err := os.Open(os.Args[1])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "engine_go:", err)
+			os.Stderr.WriteString("engine_go: " + err.Error() + "\n")
 			os.Exit(2)
 		}
 		defer f.Close()
@@ -123,8 +417,10 @@ func main() {
 	} else {
 		scanner = bufio.NewScanner(os.Stdin)
 	}
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 16*1024*1024)
 
-	stack := make([]uint64, 0, 64)
+	stack := make([]Big, 0, 64)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -134,28 +430,27 @@ func main() {
 		op := parts[0]
 		switch op {
 		case "PUSH":
-			v, _ := strconv.ParseInt(parts[1], 10, 64)
-			stack = append(stack, uint64(v))
+			stack = append(stack, fromDec(parts[1]))
 		case "NEG":
 			n := len(stack)
-			stack[n-1] = neg(stack[n-1])
+			stack[n-1].sign = -stack[n-1].sign
 		default:
 			n := len(stack)
 			b := stack[n-1]
 			a := stack[n-2]
 			stack = stack[:n-2]
-			var res uint64
+			var res Big
 			switch op {
 			case "ADD":
-				res = add(a, b)
+				res = bigAdd(a, b)
 			case "SUB":
-				res = sub(a, b)
+				res = bigSub(a, b)
 			case "MUL":
-				res = mul(a, b)
+				res = bigMul(a, b)
 			case "DIV", "MOD":
-				q, r, ok := sdivmod(a, b)
+				q, r, ok := bigDivmod(a, b)
 				if !ok {
-					fmt.Println("ERR:DIVZERO")
+					os.Stdout.WriteString("ERR:DIVZERO\n")
 					return
 				}
 				if op == "DIV" {
@@ -170,10 +465,9 @@ func main() {
 			stack = append(stack, res)
 		}
 	}
-
 	if len(stack) < 1 {
-		fmt.Fprintln(os.Stderr, "engine_go: empty stack")
+		os.Stderr.WriteString("engine_go: empty stack\n")
 		os.Exit(4)
 	}
-	fmt.Println(int64(stack[len(stack)-1]))
+	os.Stdout.WriteString(toDec(stack[len(stack)-1]) + "\n")
 }
