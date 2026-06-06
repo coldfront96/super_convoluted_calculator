@@ -5,14 +5,21 @@
 # Conducts the entire polyglot cathedral for a single arithmetic expression:
 #
 #   Perl lexer -> Python parser -> Ruby compiler -> base64 transport
-#   -> {C, Rust, Go, Java} engines -> awk Byzantine consensus
+#   -> {C, Rust, Go, Java, Bash} engines -> awk Byzantine quorum
 #   -> Node renderer -> jq extraction
+#
+# Two modes:
+#   direct   (default) — stages are invoked as local subprocesses (fast).
+#   --service          — every stage is a real HTTP microservice; the
+#                        orchestrator calls them over the network with retries
+#                        and a circuit breaker. The mesh is auto-started.
 #
 # stdout: the headline decimal answer (or, with --report, the full JSON render).
 # stderr: pompous ceremony narrating every stage.
 #
 # Usage:  ./calc "1 + 2 * (3 - 4)"
 #         ./calc --report "6 * 7"
+#         ./calc --service "123456789 * 987654321"
 # ============================================================================
 set -euo pipefail
 
@@ -21,17 +28,19 @@ BUILD="$HERE/build"
 
 # ---- argument parsing ----
 REPORT=0
+SERVICE=0
 ARGS=()
 for a in "$@"; do
     case "$a" in
-        --report|-r) REPORT=1 ;;
-        --quiet|-q)  exec 2>/dev/null ;;
-        *)           ARGS+=("$a") ;;
+        --report|-r)  REPORT=1 ;;
+        --service|-s) SERVICE=1 ;;
+        --quiet|-q)   exec 2>/dev/null ;;
+        *)            ARGS+=("$a") ;;
     esac
 done
 EXPR="${ARGS[*]:-}"
 if [[ -z "${EXPR// }" ]]; then
-    echo "usage: calc [--report] \"<expression>\"" >&2
+    echo "usage: calc [--report] [--service] \"<expression>\"" >&2
     exit 64
 fi
 
@@ -43,8 +52,9 @@ need_build=0
 for artifact in engine_c engine_rust engine_go Engine.class; do
     [[ -e "$BUILD/$artifact" ]] || need_build=1
 done
+if [[ $SERVICE -eq 1 ]]; then [[ -e "$BUILD/sidecar" ]] || need_build=1; fi
 if [[ $need_build -eq 1 ]]; then
-    step "engines missing; invoking make..."
+    step "build artifacts missing; invoking make..."
     make -C "$HERE" all >&2
 fi
 
@@ -52,54 +62,99 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/calc.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 banner "SUPER CONVOLUTED CALCULATOR — evaluating: $EXPR"
+[[ $SERVICE -eq 1 ]] && banner "(service mode: every stage is an HTTP microservice)"
 
-# ---- STAGE 1: Perl lexer -> CSV ----
-step "stage 1/6  [perl]   lexing into CSV tokens"
-perl "$HERE/pipeline/01_lexer.pl" "$EXPR" > "$WORK/tokens.csv"
+# Helper to append an optional Byzantine traitor vote to a votes array.
+maybe_traitor() {
+    if [[ -n "${CALC_TRAITOR:-}" ]]; then
+        step "          injecting Byzantine traitor vote: $CALC_TRAITOR"
+        votes+=("$CALC_TRAITOR")
+    fi
+}
 
-# ---- STAGE 2: Python parser -> AST JSON ----
-step "stage 2/6  [python] parsing CSV into an AST"
-python3 "$HERE/pipeline/02_parser.py" < "$WORK/tokens.csv" > "$WORK/ast.json"
+verdict=""
 
-# ---- STAGE 3: Ruby compiler -> base64 bytecode ----
-step "stage 3/6  [ruby]   compiling AST to base64 bytecode"
-ruby "$HERE/pipeline/03_compiler.rb" < "$WORK/ast.json" > "$WORK/program.b64"
+if [[ $SERVICE -eq 0 ]]; then
+    # ====================== DIRECT MODE ==============================
+    step "stage 1/6  [perl]   lexing into CSV tokens"
+    perl "$HERE/pipeline/01_lexer.pl" "$EXPR" > "$WORK/tokens.csv"
 
-# ---- transport: decode the base64 into runnable bytecode ----
-base64 -d "$WORK/program.b64" > "$WORK/program.bytecode"
+    step "stage 2/6  [python] parsing CSV into an AST"
+    python3 "$HERE/pipeline/02_parser.py" < "$WORK/tokens.csv" > "$WORK/ast.json"
 
-# ---- STAGE 4: five independent engines execute the same bytecode ----
-step "stage 4/6  [c/rust/go/java/bash] running five independent engines"
-r_c="$(   "$BUILD/engine_c"    "$WORK/program.bytecode")"
-r_rust="$("$BUILD/engine_rust" "$WORK/program.bytecode")"
-r_go="$(  "$BUILD/engine_go"   "$WORK/program.bytecode")"
-r_java="$(java -cp "$BUILD" Engine "$WORK/program.bytecode")"
-r_bash="$(bash "$HERE/engines/engine_bash.sh" "$WORK/program.bytecode")"
-step "          C=$r_c  Rust=$r_rust  Go=$r_go  Java=$r_java  Bash=$r_bash"
+    step "stage 3/6  [ruby]   compiling AST to base64 bytecode"
+    ruby "$HERE/pipeline/03_compiler.rb" < "$WORK/ast.json" > "$WORK/program.b64"
+    base64 -d "$WORK/program.b64" > "$WORK/program.bytecode"
 
-votes=("$r_c" "$r_rust" "$r_go" "$r_java" "$r_bash")
-# Optional Byzantine fault injection: CALC_TRAITOR adds one lying vote so we can
-# prove on the real path that the quorum outvotes (and names) a traitor.
-if [[ -n "${CALC_TRAITOR:-}" ]]; then
-    step "          injecting Byzantine traitor vote: $CALC_TRAITOR"
-    votes+=("$CALC_TRAITOR")
+    step "stage 4/6  [c/rust/go/java/bash] running five independent engines"
+    r_c="$(   "$BUILD/engine_c"    "$WORK/program.bytecode")"
+    r_rust="$("$BUILD/engine_rust" "$WORK/program.bytecode")"
+    r_go="$(  "$BUILD/engine_go"   "$WORK/program.bytecode")"
+    r_java="$(java -cp "$BUILD" Engine "$WORK/program.bytecode")"
+    r_bash="$(bash "$HERE/engines/engine_bash.sh" "$WORK/program.bytecode")"
+    step "          C=$r_c  Rust=$r_rust  Go=$r_go  Java=$r_java  Bash=$r_bash"
+
+    votes=("$r_c" "$r_rust" "$r_go" "$r_java" "$r_bash")
+    maybe_traitor
+
+    step "stage 5/6  [awk]    tallying Byzantine quorum (strict majority of ${#votes[@]})"
+    if ! verdict="$(printf '%s\n' "${votes[@]}" | awk -f "$HERE/pipeline/consensus.awk")"; then
+        echo "FATAL: the engines could not reach a quorum. Refusing to answer." >&2
+        exit 9
+    fi
+else
+    # ====================== SERVICE MODE =============================
+    # shellcheck source=/dev/null
+    source "$HERE/pipeline/http_client.sh"
+
+    # Auto-start the mesh if the lexer service isn't answering.
+    if ! curl -sf -m 1 "http://127.0.0.1:7001/health" >/dev/null 2>&1; then
+        step "microservices mesh is down; starting it..."
+        "$HERE/services/serviced.sh" start >&2 || { echo "could not start the mesh" >&2; exit 8; }
+    fi
+
+    step "stage 1/6  [perl   @ :7001] POST expression -> CSV tokens"
+    printf '%s' "$EXPR" | http_post lexer 7001 > "$WORK/tokens.csv"
+
+    step "stage 2/6  [python @ :7002] POST tokens -> AST"
+    http_post parser 7002 < "$WORK/tokens.csv" > "$WORK/ast.json"
+
+    step "stage 3/6  [ruby   @ :7003] POST AST -> base64 bytecode"
+    http_post compiler 7003 < "$WORK/ast.json" > "$WORK/program.b64"
+    base64 -d "$WORK/program.b64" > "$WORK/program.bytecode"
+
+    step "stage 4/6  [5 engine services] POST bytecode to each"
+    r_c="$(   http_post engine_c    7011 < "$WORK/program.bytecode")"
+    r_rust="$(http_post engine_rust 7012 < "$WORK/program.bytecode")"
+    r_go="$(  http_post engine_go   7013 < "$WORK/program.bytecode")"
+    r_java="$(http_post engine_java 7014 < "$WORK/program.bytecode")"
+    r_bash="$(http_post engine_bash 7015 < "$WORK/program.bytecode")"
+    step "          C=$r_c  Rust=$r_rust  Go=$r_go  Java=$r_java  Bash=$r_bash"
+
+    votes=("$r_c" "$r_rust" "$r_go" "$r_java" "$r_bash")
+    maybe_traitor
+
+    step "stage 5/6  [awk    @ :7020] POST votes -> Byzantine quorum (of ${#votes[@]})"
+    if ! verdict="$(printf '%s\n' "${votes[@]}" | http_post consensus 7020)"; then
+        echo "FATAL: the consensus service could not reach a quorum. Refusing to answer." >&2
+        exit 9
+    fi
 fi
 
-# ---- STAGE 5: awk Byzantine quorum consensus (strict majority) ----
-step "stage 5/6  [awk]    tallying Byzantine quorum (strict majority of ${#votes[@]})"
-if ! verdict="$(printf '%s\n' "${votes[@]}" | awk -f "$HERE/pipeline/consensus.awk")"; then
-    echo "FATAL: the engines could not reach a quorum. Refusing to answer." >&2
-    exit 9
-fi
-
+# ---- shared: division-by-zero contract ----
 if [[ "$verdict" == "ERR:DIVZERO" ]]; then
     echo "Error: division by zero is undefined." >&2
     exit 3
 fi
 
-# ---- STAGE 6: Node renderer + jq extraction ----
-step "stage 6/6  [node]   rendering & cross-verifying representations"
-render="$(node "$HERE/pipeline/09_renderer.js" "$verdict")"
+# ---- STAGE 6: render & cross-verify ----
+if [[ $SERVICE -eq 0 ]]; then
+    step "stage 6/6  [node]   rendering & cross-verifying representations"
+    render="$(node "$HERE/pipeline/09_renderer.js" "$verdict")"
+else
+    step "stage 6/6  [node   @ :7030] POST verdict -> rendered representations"
+    render="$(printf '%s' "$verdict" | http_post renderer 7030)"
+fi
 
 banner "CONSENSUS REACHED: $verdict"
 

@@ -67,6 +67,34 @@ else
     pass=$((pass + 1))
 fi
 
+echo ">> microservice mode (real HTTP mesh) — smoke test..."
+if command -v curl >/dev/null 2>&1; then
+    "$HERE/services/serviced.sh" start >/dev/null 2>&1
+    trap '"$HERE/services/serviced.sh" stop >/dev/null 2>&1' EXIT
+    for e in "1 + 2" "6 * 7" "100 / 7" "100 % 7" "(2 + 3) * (4 - 9)" \
+             "999999999999 * 999999999999" \
+             "123456789012345678901234567890 + 987654321098765432109876543210"; do
+        exp="$(python3 "$REF" "$e")"
+        got="$("$CALC" --service "$e" 2>/dev/null)"
+        if [[ "$got" == "$exp" ]]; then
+            pass=$((pass + 1))
+        else
+            fail=$((fail + 1))
+            echo "FAIL(service): '$e'  expected=$exp  got=$got"
+        fi
+    done
+    if "$CALC" --service "1 / 0" >/dev/null 2>&1; then
+        echo "FAIL(service): '1 / 0' should exit non-zero"
+        fail=$((fail + 1))
+    else
+        pass=$((pass + 1))
+    fi
+    "$HERE/services/serviced.sh" stop >/dev/null 2>&1
+    trap - EXIT
+else
+    echo "   (curl unavailable; skipping service smoke test)"
+fi
+
 echo "---------------------------------------------"
 echo "PASS=$pass  FAIL=$fail"
 [[ $fail -eq 0 ]]

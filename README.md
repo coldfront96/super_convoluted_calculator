@@ -112,14 +112,41 @@ $ ./calc "1000000000000000000 * 1000000000000000000"
 This is the point: the Byzantine quorum from Feature 1 is now genuinely
 load-bearing — it exists precisely to tolerate the bounded engine's overflow.
 
+## Two modes: direct pipe vs. microservices
+
+By default the stages run as local subprocesses (fast). With `--service`, **every
+stage becomes a real HTTP microservice** and the orchestrator calls them over the
+network — because invoking a localhost function the hard way deserves
+production-grade resilience.
+
+```sh
+./calc --service "123456789 * 987654321"
+```
+
+- **Native HTTP servers** in each stage's own language: Perl lexer (:7001),
+  Python parser (:7002), Ruby compiler (:7003), Node renderer (:7030).
+- A **generic Go sidecar** (:7011–7020) hosts the five engines + the awk
+  consensus stage behind HTTP.
+- The orchestrator talks to them with **exponential-backoff retries** and a
+  **per-service circuit breaker** (`pipeline/http_client.sh`).
+- A **YAML config nobody needs** (`services/services.yaml`) drives a launcher:
+
+```sh
+services/serviced.sh start     # boot the 10-service mesh
+services/serviced.sh status    # health of every service
+services/serviced.sh stop
+./calc --service "2 ^ ... "    # (calc auto-starts the mesh if it's down)
+```
+
 ## Usage
 
 ```sh
-make all                       # build the four engines
+make all                       # build the engines + the HTTP sidecar
 ./calc "2 * (3 + 4)"           # -> 14
 ./calc --report "6 * 7"        # full JSON render (decimal/hex/binary/roman/words)
+./calc --service "6 * 7"       # same answer, but over an HTTP microservice mesh
 ./calc "1 / 0"; echo $?        # -> error on stderr, exit code 3
-bash tests/run_tests.sh        # 274 cases vs. an independent Python oracle
+bash tests/run_tests.sh        # 411 checks vs. an independent Python oracle
 ```
 
 ## Requirements
@@ -146,6 +173,17 @@ engines/
   engine_go/main.go     # Go   — gate-level VM (engine C)
   Engine.java           # Java — the sane oracle (engine D)
   engine_bash.sh        # Bash — gate-level VM (engine E, slowest & proudest)
+services/                 # --service mode: the HTTP microservices mesh
+  services.yaml         # the YAML config nobody needs
+  svc_config.py         # YAML reader (single source of truth)
+  serviced.sh           # launcher: start/stop/status the mesh
+  lexer_service.pl      # Perl   native HTTP server
+  parser_service.py     # Python native HTTP server
+  compiler_service.rb   # Ruby   native HTTP server
+  renderer_service.js   # Node   native HTTP server
+  sidecar/main.go       # generic Go HTTP sidecar (hosts engines + consensus)
+pipeline/
+  http_client.sh        # retries + circuit breaker for --service mode
 tests/
   reference.py          # independent oracle of truth
   run_tests.sh          # the test suite

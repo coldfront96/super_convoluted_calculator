@@ -4,7 +4,7 @@
 BUILD := build
 
 .PHONY: all clean
-all: $(BUILD)/engine_c $(BUILD)/engine_rust $(BUILD)/engine_go $(BUILD)/Engine.class
+all: $(BUILD)/engine_c $(BUILD)/engine_rust $(BUILD)/engine_go $(BUILD)/Engine.class $(BUILD)/sidecar
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -24,6 +24,10 @@ $(BUILD)/engine_go: engines/engine_go/main.go engines/engine_go/go.mod | $(BUILD
 # ENGINE D — Java sane oracle
 $(BUILD)/Engine.class: engines/Engine.java | $(BUILD)
 	javac -d $(BUILD) engines/Engine.java
+
+# Generic HTTP sidecar (used by --service mode to host CLI engines)
+$(BUILD)/sidecar: services/sidecar/main.go services/sidecar/go.mod | $(BUILD)
+	cd services/sidecar && GOTOOLCHAIN=local GOFLAGS=-mod=mod go build -o ../../$(BUILD)/sidecar .
 
 clean:
 	rm -rf $(BUILD)

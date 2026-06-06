@@ -2,4 +2,6 @@ build/
 *.class
 *.o
 .calc_work/
+.services/
 engines/engine_go/engine_go
+services/sidecar/sidecar

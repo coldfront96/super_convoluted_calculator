@@ -1,0 +1,27 @@
+# ============================================================================
+# The microservices mesh configuration that absolutely nobody asked for.
+# Used only in --service mode; the default direct-pipe mode ignores all of this.
+# ============================================================================
+default_mode: direct
+
+http:
+  retries: 4              # attempts per call before giving up
+  backoff_ms: 200         # initial retry delay; doubles each attempt
+  circuit:
+    failure_threshold: 3  # consecutive failures before the breaker opens
+    cooldown_ms: 5000     # how long the breaker stays open
+
+# Each stage of the pipeline, promoted to a network service on its own port.
+# "native"  services are real HTTP servers written in the stage's own language.
+# "sidecar" services wrap an existing CLI engine behind the generic Go sidecar.
+services:
+  lexer:       { lang: perl,   port: 7001, native:  "perl services/lexer_service.pl 7001" }
+  parser:      { lang: python, port: 7002, native:  "python3 services/parser_service.py 7002" }
+  compiler:    { lang: ruby,   port: 7003, native:  "ruby services/compiler_service.rb 7003" }
+  engine_c:    { lang: c,      port: 7011, sidecar: "build/engine_c" }
+  engine_rust: { lang: rust,   port: 7012, sidecar: "build/engine_rust" }
+  engine_go:   { lang: go,     port: 7013, sidecar: "build/engine_go" }
+  engine_java: { lang: java,   port: 7014, sidecar: "java -cp build Engine" }
+  engine_bash: { lang: bash,   port: 7015, sidecar: "bash engines/engine_bash.sh" }
+  consensus:   { lang: awk,    port: 7020, sidecar: "awk -f pipeline/consensus.awk" }
+  renderer:    { lang: node,   port: 7030, native:  "node services/renderer_service.js 7030" }
