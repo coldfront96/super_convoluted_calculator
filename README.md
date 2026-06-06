@@ -1,5 +1,7 @@
 # 🏛️ The Super Convoluted Calculator
 
+[![ci](https://github.com/coldfront96/super_convoluted_calculator/actions/workflows/ci.yml/badge.svg)](https://github.com/coldfront96/super_convoluted_calculator/actions/workflows/ci.yml)
+
 A calculator that computes `1 + 2 = 3` — **correctly, every time** — by way of an
 eleven-language pipeline, a virtual machine whose ALU is built from individual
 logic gates, five independent execution engines, and a Byzantine quorum vote.

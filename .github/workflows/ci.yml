@@ -1,0 +1,70 @@
+# ============================================================================
+# CI for the Super Convoluted Calculator.
+# Keeps the cathedral green: builds all five engines + the HTTP sidecar across
+# every language, then runs the full suite (curated, randomized, arbitrary
+# precision, Byzantine fault tolerance, division-by-zero, and the live HTTP
+# microservice mesh) against an independent Python oracle.
+# ============================================================================
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- toolchains for the polyglot cathedral ----
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust (stable)
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - name: Install remaining dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyyaml
+          # gcc, perl, ruby, awk, jq, curl are preinstalled on ubuntu-latest
+          echo "--- tool versions ---"
+          gcc --version | head -1
+          perl --version | sed -n 2p
+          ruby --version
+          node --version
+          go version
+          java -version
+          jq --version
+          curl --version | head -1
+
+      - name: Build all engines and the HTTP sidecar
+        run: make all
+
+      - name: Run the full test suite
+        run: bash tests/run_tests.sh
