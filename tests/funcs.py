@@ -84,6 +84,29 @@ def _cos_dec(x: Decimal) -> Decimal:
     return s
 
 
+def _atan_dec(x: Decimal) -> Decimal:
+    neg = x < 0
+    if neg:
+        x = -x
+    # argument reduction: atan(x) = 2*atan(x/(1+sqrt(1+x^2)))
+    m = 0
+    thresh = Decimal("0.1")
+    while x > thresh:
+        x = x / (1 + (1 + x * x).sqrt())
+        m += 1
+    term = x
+    s = x
+    x2 = x * x
+    k = 1
+    tiny = Decimal(10) ** (-(getcontext().prec - 5))
+    while abs(term) > tiny:
+        term = -term * x2
+        s += term / Decimal(2 * k + 1)
+        k += 1
+    s = s * (1 << m)
+    return -s if neg else s
+
+
 def _func_dec(name: str, x: Decimal) -> Decimal:
     if name == "sqrt":
         if x < 0:
@@ -113,6 +136,33 @@ def _func_dec(name: str, x: Decimal) -> Decimal:
         if c == 0:
             raise DomainError
         return _sin_dec(x) / c
+    if name == "atan":
+        return _atan_dec(x)
+    if name == "asin":
+        if x < -1 or x > 1:
+            raise DomainError
+        if x == 1:
+            return PI / 2
+        if x == -1:
+            return -PI / 2
+        return _atan_dec(x / (1 - x * x).sqrt())
+    if name == "acos":
+        if x < -1 or x > 1:
+            raise DomainError
+        return PI / 2 - _func_dec("asin", x)
+    if name == "sinh":
+        e = x.exp()
+        return (e - 1 / e) / 2
+    if name == "cosh":
+        e = x.exp()
+        return (e + 1 / e) / 2
+    if name == "tanh":
+        e = x.exp(); f = 1 / e
+        return (e - f) / (e + f)
+    if name == "rad":
+        return x * PI / 180
+    if name == "deg":
+        return x * 180 / PI
     raise ValueError("unknown function " + name)
 
 

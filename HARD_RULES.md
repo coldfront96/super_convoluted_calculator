@@ -31,8 +31,8 @@ Same input → same correct output, every time. No randomness in the answer.
 ## Rule 6 — It stays a calculator
 Real expression in, real answer out. Supports `+ - * / // % ^`, parentheses,
 unary minus, decimal/scientific literals, the functions
-`sqrt cbrt exp ln log sin cos tan abs` and constants `pi`/`e`, with correct
-precedence. Rational results are **exact arbitrary-precision** (p/q of bignums):
+`sqrt cbrt exp ln log sin cos tan asin acos atan sinh cosh tanh rad deg fact abs`
+and constants `pi`/`e`, with correct precedence. Rational results are **exact arbitrary-precision** (p/q of bignums):
 `/` exact division, `//` truncates toward zero, `%` takes the dividend's sign,
 integer `^` exact. Irrational results (functions, non-integer powers) are
 computed at high precision, correctly rounded to 80 significant digits internally

@@ -463,6 +463,54 @@ fn fp_cos(x: &Big, s: &Big, two_pi: &Big) -> Big {
     }
     sum
 }
+fn fp_sqrt(x: &Big, s: &Big) -> Big { big_isqrt(&big_mul(x, s)) }
+fn fp_atan(x: &Big, s: &Big) -> Big {
+    let mut xx = x.clone(); let neg = xx.sign < 0; xx.sign = if xx.d.is_empty() { 0 } else { 1 };
+    let thresh = fp_div_int(s, 10);
+    let mut m = 0;
+    while cmp_abs(&xx, &thresh) > 0 && m < 4096 {
+        let x2 = fp_mul(&xx, &xx, s);
+        let rt = fp_sqrt(&big_add(s, &x2), s);
+        xx = fp_div(&xx, &big_add(s, &rt), s);
+        m += 1;
+    }
+    let mut sum = xx.clone(); let mut term = xx.clone(); let x2 = fp_mul(&xx, &xx, s);
+    let mut k: u32 = 1;
+    while term.sign != 0 && k < 200000 {
+        term = fp_mul(&term, &x2, s); term.sign = -term.sign;
+        sum = big_add(&sum, &fp_div_int(&term, 2 * k + 1));
+        k += 1;
+    }
+    for _ in 0..m { sum = big_add(&sum, &sum); }
+    if neg { sum.sign = -sum.sign; }
+    sum
+}
+fn fp_asin(x: &Big, s: &Big, pi: &Big) -> Option<Big> {
+    let mut ax = x.clone(); ax.sign = if ax.d.is_empty() { 0 } else { 1 };
+    let c = cmp_abs(&ax, s);
+    if c > 0 { return None; }
+    if c == 0 { let mut h = fp_div_int(pi, 2); if x.sign < 0 { h.sign = -h.sign; } return Some(h); }
+    let d = big_sub(s, &fp_mul(x, x, s));
+    Some(fp_atan(&fp_div(x, &fp_sqrt(&d, s), s), s))
+}
+fn fp_acos(x: &Big, s: &Big, pi: &Big) -> Option<Big> {
+    let a = fp_asin(x, s, pi)?;
+    Some(big_sub(&fp_div_int(pi, 2), &a))
+}
+fn fp_sinh(x: &Big, s: &Big) -> Big {
+    let mut nx = x.clone(); nx.sign = -nx.sign;
+    fp_div_int(&big_sub(&fp_exp(x, s), &fp_exp(&nx, s)), 2)
+}
+fn fp_cosh(x: &Big, s: &Big) -> Big {
+    let mut nx = x.clone(); nx.sign = -nx.sign;
+    fp_div_int(&big_add(&fp_exp(x, s), &fp_exp(&nx, s)), 2)
+}
+fn fp_tanh(x: &Big, s: &Big) -> Big {
+    let mut nx = x.clone(); nx.sign = -nx.sign;
+    let e1 = fp_exp(x, s); let e2 = fp_exp(&nx, s);
+    fp_div(&big_sub(&e1, &e2), &big_add(&e1, &e2), s)
+}
+
 fn build_fp() -> FP {
     let scale = pow10(WP);
     let pi = fp_parse_const(PI_STR, &scale);
@@ -623,6 +671,16 @@ fn main() {
                     stack.push(r);
                     continue;
                 }
+                if name == "fact" {
+                    if !big_is_one(&a.den) || a.num.sign < 0 || big_cmp(&a.num, &big_set_int(20000)) > 0 {
+                        println!("ERR:DOMAIN"); return;
+                    }
+                    let n: i64 = if a.num.d.is_empty() { 0 } else { a.num.d[0] as i64 };
+                    let mut f = big_one();
+                    for i in 2..=n { f = big_mul(&f, &big_set_int(i)); }
+                    stack.push(Rat { num: f, den: big_one(), inexact: a.inexact });
+                    continue;
+                }
                 let c = fpc();
                 let x = fp_from_rat(&a.num, &a.den, &c.scale);
                 let y = match name {
@@ -633,6 +691,14 @@ fn main() {
                     "sin" => fp_sin(&x, &c.scale, &c.two_pi),
                     "cos" => fp_cos(&x, &c.scale, &c.two_pi),
                     "tan" => { let s = fp_sin(&x, &c.scale, &c.two_pi); let co = fp_cos(&x, &c.scale, &c.two_pi); if co.sign == 0 { println!("ERR:DOMAIN"); return; } fp_div(&s, &co, &c.scale) }
+                    "asin" => match fp_asin(&x, &c.scale, &c.pi) { Some(v) => v, None => { println!("ERR:DOMAIN"); return; } },
+                    "acos" => match fp_acos(&x, &c.scale, &c.pi) { Some(v) => v, None => { println!("ERR:DOMAIN"); return; } },
+                    "atan" => fp_atan(&x, &c.scale),
+                    "sinh" => fp_sinh(&x, &c.scale),
+                    "cosh" => fp_cosh(&x, &c.scale),
+                    "tanh" => fp_tanh(&x, &c.scale),
+                    "rad" => fp_mul(&x, &fp_div_int(&c.pi, 180), &c.scale),
+                    "deg" => { let f180 = fp_from_rat(&big_set_int(180), &big_one(), &c.scale); fp_div(&fp_mul(&x, &f180, &c.scale), &c.pi, &c.scale) }
                     "cbrt" => {
                         if x.sign == 0 { Big::zero() }
                         else { let mut ax = x.clone(); let neg = ax.sign < 0; ax.sign = 1; let mut y = fp_exp(&fp_div_int(&fp_ln(&ax, &c.scale, &c.ln2), 3), &c.scale); if neg { y.sign = -y.sign; } y }

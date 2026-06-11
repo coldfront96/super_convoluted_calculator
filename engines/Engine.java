@@ -169,6 +169,44 @@ public class Engine {
         }
         return sum;
     }
+    static BigInteger fpSqrt(BigInteger x) { return x.multiply(SCALE).sqrt(); }
+    static BigInteger fpAtan(BigInteger x) {
+        boolean neg = x.signum() < 0;
+        BigInteger xx = x.abs();
+        BigInteger thresh = SCALE.divide(TEN);
+        int m = 0;
+        while (xx.compareTo(thresh) > 0 && m < 4096) {
+            BigInteger rt = fpSqrt(SCALE.add(fpMul(xx, xx)));
+            xx = fpDiv(xx, SCALE.add(rt));
+            m++;
+        }
+        BigInteger sum = xx, term = xx, x2 = fpMul(xx, xx);
+        long k = 1;
+        while (term.signum() != 0 && k < 200000) {
+            term = fpMul(term, x2).negate();
+            sum = sum.add(fpDivInt(term, 2 * k + 1));
+            k++;
+        }
+        for (int i = 0; i < m; i++) sum = sum.shiftLeft(1);
+        return neg ? sum.negate() : sum;
+    }
+    static BigInteger fpAsin(BigInteger x) {      // null on domain error
+        BigInteger ax = x.abs();
+        int c = ax.compareTo(SCALE);
+        if (c > 0) return null;
+        if (c == 0) { BigInteger h = FP_PI.divide(TWO); return x.signum() < 0 ? h.negate() : h; }
+        BigInteger d = SCALE.subtract(fpMul(x, x));
+        return fpAtan(fpDiv(x, fpSqrt(d)));
+    }
+    static BigInteger fpAcos(BigInteger x) {
+        BigInteger a = fpAsin(x);
+        if (a == null) return null;
+        return FP_PI.divide(TWO).subtract(a);
+    }
+    static BigInteger fpSinh(BigInteger x) { BigInteger e1 = fpExp(x), e2 = fpExp(x.negate()); return fpDivInt(e1.subtract(e2), 2); }
+    static BigInteger fpCosh(BigInteger x) { BigInteger e1 = fpExp(x), e2 = fpExp(x.negate()); return fpDivInt(e1.add(e2), 2); }
+    static BigInteger fpTanh(BigInteger x) { BigInteger e1 = fpExp(x), e2 = fpExp(x.negate()); return fpDiv(e1.subtract(e2), e1.add(e2)); }
+
     static void fpInit() {
         if (fpReady) return;
         fpReady = true;
@@ -239,6 +277,14 @@ public class Engine {
                     case "FUNC": {
                         Rat a = st.pop();
                         if (p[1].equals("abs")) { st.push(rat(a.num.abs(), a.den, a.inexact)); break; }
+                        if (p[1].equals("fact")) {
+                            if (!a.den.equals(ONE) || a.num.signum() < 0 || a.num.compareTo(BigInteger.valueOf(20000)) > 0) { System.out.println("ERR:DOMAIN"); return; }
+                            int n = a.num.intValueExact();
+                            BigInteger f = ONE;
+                            for (int i = 2; i <= n; i++) f = f.multiply(BigInteger.valueOf(i));
+                            st.push(rat(f, ONE, a.inexact));
+                            break;
+                        }
                         fpInit();
                         BigInteger x = fpFromRat(a.num, a.den), y;
                         switch (p[1]) {
@@ -249,6 +295,14 @@ public class Engine {
                             case "sin": y = fpSin(x); break;
                             case "cos": y = fpCos(x); break;
                             case "tan": { BigInteger c = fpCos(x); if (c.signum() == 0) { System.out.println("ERR:DOMAIN"); return; } y = fpDiv(fpSin(x), c); break; }
+                            case "asin": { BigInteger r = fpAsin(x); if (r == null) { System.out.println("ERR:DOMAIN"); return; } y = r; break; }
+                            case "acos": { BigInteger r = fpAcos(x); if (r == null) { System.out.println("ERR:DOMAIN"); return; } y = r; break; }
+                            case "atan": y = fpAtan(x); break;
+                            case "sinh": y = fpSinh(x); break;
+                            case "cosh": y = fpCosh(x); break;
+                            case "tanh": y = fpTanh(x); break;
+                            case "rad": y = fpMul(x, FP_PI.divide(BigInteger.valueOf(180))); break;
+                            case "deg": { BigInteger f180 = fpFromRat(BigInteger.valueOf(180), ONE); y = fpDiv(fpMul(x, f180), FP_PI); break; }
                             case "cbrt":
                                 if (x.signum() == 0) y = ZERO;
                                 else { boolean neg = x.signum() < 0; BigInteger r = fpExp(fpDivInt(fpLn(x.abs()), 3)); y = neg ? r.negate() : r; }

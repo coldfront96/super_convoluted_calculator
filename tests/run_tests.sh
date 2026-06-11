@@ -59,7 +59,7 @@ fi
 rm -f "$traitor_err"
 
 echo ">> unknown function / constant must error (not silently lie)..."
-for bad in "asin(1)" "foo(2)" "x + 1" "gamma(3)"; do
+for bad in "sec(1)" "asinh(0)" "foo(2)" "x + 1" "gamma(3)"; do
     if "$CALC" "$bad" >/dev/null 2>&1; then
         echo "FAIL: '$bad' should error, not return a value"
         fail=$((fail + 1))

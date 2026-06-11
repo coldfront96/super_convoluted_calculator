@@ -507,6 +507,58 @@ static void fp_cos(const Big *x, Big *out) {
     }
     big_copy(&sum, out);
 }
+static void fp_sqrt(const Big *x, Big *out) { Big t; big_mul(x, &SCALE, &t); big_isqrt(&t, out); }
+static void fp_atan(const Big *x, Big *out) {
+    Big xx; big_copy(x, &xx); int neg = xx.sign < 0; xx.sign = xx.n ? 1 : 0;
+    Big thresh; fp_div_int(&SCALE, 10, &thresh);    /* 0.1 */
+    int m = 0;
+    while (cmp_abs(&xx, &thresh) > 0 && m < 4096) {
+        Big x2; fp_mul(&xx, &xx, &x2);
+        Big s; big_add(&SCALE, &x2, &s);            /* 1 + x^2 */
+        Big rt; fp_sqrt(&s, &rt);
+        Big den; big_add(&SCALE, &rt, &den);        /* 1 + sqrt(1+x^2) */
+        Big nx; fp_div(&xx, &den, &nx); big_copy(&nx, &xx); m++;
+    }
+    Big sum, term, x2; big_copy(&xx, &sum); big_copy(&xx, &term); fp_mul(&xx, &xx, &x2);
+    uint32_t k = 1;
+    while (term.sign != 0 && k < 200000) {
+        Big t; fp_mul(&term, &x2, &t); big_copy(&t, &term); term.sign = -term.sign;
+        Big d; fp_div_int(&term, 2 * k + 1, &d);
+        Big ss; big_add(&sum, &d, &ss); big_copy(&ss, &sum);
+        k++;
+    }
+    for (int i = 0; i < m; i++) { Big d2; big_add(&sum, &sum, &d2); big_copy(&d2, &sum); }
+    if (neg) sum.sign = -sum.sign;
+    big_copy(&sum, out);
+}
+static int fp_asin(const Big *x, Big *out) {       /* 1 ok, 0 domain */
+    Big ax; big_copy(x, &ax); ax.sign = ax.n ? 1 : 0;
+    if (cmp_abs(&ax, &SCALE) > 0) return 0;
+    if (cmp_abs(&ax, &SCALE) == 0) {
+        Big half; fp_div_int(&FP_PI, 2, &half); if (x->sign < 0) half.sign = -half.sign;
+        big_copy(&half, out); return 1;
+    }
+    Big x2, d, rt, arg; fp_mul(x, x, &x2); big_sub(&SCALE, &x2, &d); fp_sqrt(&d, &rt); fp_div(x, &rt, &arg);
+    fp_atan(&arg, out); return 1;
+}
+static int fp_acos(const Big *x, Big *out) {
+    Big as; if (!fp_asin(x, &as)) return 0;
+    Big half; fp_div_int(&FP_PI, 2, &half); big_sub(&half, &as, out); return 1;
+}
+static void fp_sinh(const Big *x, Big *out) {
+    Big nx; big_copy(x, &nx); nx.sign = -nx.sign;
+    Big e1, e2, d; fp_exp(x, &e1); fp_exp(&nx, &e2); big_sub(&e1, &e2, &d); fp_div_int(&d, 2, out);
+}
+static void fp_cosh(const Big *x, Big *out) {
+    Big nx; big_copy(x, &nx); nx.sign = -nx.sign;
+    Big e1, e2, d; fp_exp(x, &e1); fp_exp(&nx, &e2); big_add(&e1, &e2, &d); fp_div_int(&d, 2, out);
+}
+static void fp_tanh(const Big *x, Big *out) {
+    Big nx; big_copy(x, &nx); nx.sign = -nx.sign;
+    Big e1, e2, nu, de; fp_exp(x, &e1); fp_exp(&nx, &e2); big_sub(&e1, &e2, &nu); big_add(&e1, &e2, &de);
+    fp_div(&nu, &de, out);
+}
+
 static void fp_init(void) {
     if (FP_INIT) return; FP_INIT = 1;
     pow10(WP, &SCALE);
@@ -674,6 +726,16 @@ int main(int argc, char **argv) {
                 stack[sp] = a; sp++;
                 continue;
             }
+            if (!strcmp(operand, "fact")) {       /* exact factorial of a whole number */
+                Big cap; big_set_int(&cap, 20000);
+                if (!big_is_one(&a.den) || a.num.sign < 0 || big_cmp(&a.num, &cap) > 0) { printf("ERR:DOMAIN\n"); return 0; }
+                long nn = a.num.n == 0 ? 0 : (long)a.num.d[0];
+                Big f; big_one(&f);
+                for (long i = 2; i <= nn; i++) { Big im, t; big_set_int(&im, i); big_mul(&f, &im, &t); big_copy(&t, &f); }
+                Rat res; big_copy(&f, &res.num); big_one(&res.den); res.inexact = a.inexact;
+                stack[sp] = res; sp++;
+                continue;
+            }
             Big X; fp_from_rat(&a.num, &a.den, &X);
             Big Y; int dom = 0;
             if (!strcmp(operand, "sqrt")) { if (X.sign < 0) dom = 1; else { Big t; big_mul(&X, &SCALE, &t); big_isqrt(&t, &Y); } }
@@ -683,6 +745,14 @@ int main(int argc, char **argv) {
             else if (!strcmp(operand, "sin")) fp_sin(&X, &Y);
             else if (!strcmp(operand, "cos")) fp_cos(&X, &Y);
             else if (!strcmp(operand, "tan")) { Big s, c; fp_sin(&X, &s); fp_cos(&X, &c); if (c.sign == 0) dom = 1; else fp_div(&s, &c, &Y); }
+            else if (!strcmp(operand, "asin")) { if (!fp_asin(&X, &Y)) dom = 1; }
+            else if (!strcmp(operand, "acos")) { if (!fp_acos(&X, &Y)) dom = 1; }
+            else if (!strcmp(operand, "atan")) fp_atan(&X, &Y);
+            else if (!strcmp(operand, "sinh")) fp_sinh(&X, &Y);
+            else if (!strcmp(operand, "cosh")) fp_cosh(&X, &Y);
+            else if (!strcmp(operand, "tanh")) fp_tanh(&X, &Y);
+            else if (!strcmp(operand, "rad")) { Big k; fp_div_int(&FP_PI, 180, &k); fp_mul(&X, &k, &Y); }
+            else if (!strcmp(operand, "deg")) { Big c180, one1, f180, t; big_set_int(&c180, 180); big_one(&one1); fp_from_rat(&c180, &one1, &f180); fp_mul(&X, &f180, &t); fp_div(&t, &FP_PI, &Y); }
             else if (!strcmp(operand, "cbrt")) {
                 if (X.sign == 0) big_zero(&Y);
                 else { Big ax; big_copy(&X, &ax); int neg = ax.sign < 0; ax.sign = 1; Big l, l3; fp_ln(&ax, &l); fp_div_int(&l, 3, &l3); fp_exp(&l3, &Y); if (neg) Y.sign = -Y.sign; }

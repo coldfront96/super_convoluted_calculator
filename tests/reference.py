@@ -25,7 +25,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from funcs import (call_func, const, pow_inexact, round_sig_fraction,
                    DomainError, OUT_SIG)
 
-FUNCS = {"sqrt", "cbrt", "exp", "ln", "log", "log10", "sin", "cos", "tan", "abs"}
+FUNCS = {"sqrt", "cbrt", "exp", "ln", "log", "log10", "sin", "cos", "tan",
+         "asin", "acos", "atan", "sinh", "cosh", "tanh", "rad", "deg",
+         "fact", "abs"}
 CONSTS = {"pi", "e"}
 
 TOKEN = re.compile(
@@ -169,6 +171,13 @@ class Parser:
                 self.nxt()
                 if name == "abs":
                     return V(abs(arg.f), arg.x)   # abs preserves exactness
+                if name == "fact":                # exact factorial of a whole number
+                    if arg.f.denominator != 1 or arg.f < 0 or arg.f.numerator > 20000:
+                        raise DomainError
+                    r = 1
+                    for i in range(2, arg.f.numerator + 1):
+                        r *= i
+                    return V(Fraction(r), arg.x)
                 if name not in FUNCS:
                     raise ValueError(f"unknown function {name}")
                 return V(call_func("log10" if name == "log" else name, arg.f), True)
@@ -261,9 +270,16 @@ def gen_fn(rng, depth=0):
     if depth >= 2 or rng.random() < 0.5:
         kind = rng.random()
         if kind < 0.4:
-            fn = rng.choice(["sqrt", "exp", "ln", "log", "sin", "cos", "tan", "cbrt"])
+            fn = rng.choice(["sqrt", "exp", "ln", "log", "sin", "cos", "tan", "cbrt",
+                             "atan", "sinh", "cosh", "tanh", "rad", "deg"])
             return f"{fn}({gen_fn_arg(rng)})"
-        if kind < 0.55:
+        if kind < 0.5:
+            fn = rng.choice(["asin", "acos"])
+            sign = "-" if rng.random() < 0.3 else ""
+            return f"{fn}({sign}0.{rng.randint(0, 999):03d})"
+        if kind < 0.58:
+            return f"fact({rng.randint(0, 12)})"
+        if kind < 0.68:
             return rng.choice(["pi", "e"])
         return gen_fn_arg(rng)
     op = rng.choice(["+", "-", "*", "/"])
@@ -285,6 +301,11 @@ CURATED = [
     "pi", "e", "2 * pi", "pi * 2 + 1", "abs(-5)", "abs(-1 / 3)", "abs(3.5)",
     "2 ^ (1 / 2)", "4 ^ 0.5", "8 ^ (1 / 3)", "exp(ln(5))", "sqrt(2) + 1 / 3",
     "sin(1) ^ 2 + cos(1) ^ 2", "ln(exp(3))", "10 ^ 0.5",
+    # ---- Core+ functions ----
+    "atan(1) * 4", "asin(1)", "asin(0.5)", "acos(0)", "acos(-1)", "atan(0)",
+    "sinh(0)", "cosh(0)", "tanh(0)", "cosh(1)", "tanh(2)",
+    "fact(0)", "fact(1)", "fact(5)", "fact(10)", "fact(20)",
+    "rad(180)", "deg(pi)", "sin(rad(30))", "cos(rad(60))", "deg(atan(1))",
 ]
 
 

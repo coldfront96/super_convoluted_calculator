@@ -742,6 +742,79 @@ func fpCos(x, s, twoPi Big) Big {
 	}
 	return sum
 }
+func fpSqrt(x, s Big) Big { return bigIsqrt(bigMul(x, s)) }
+func fpAtan(x, s Big) Big {
+	xx := x
+	neg := xx.sign < 0
+	if len(xx.d) == 0 {
+		xx.sign = 0
+	} else {
+		xx.sign = 1
+	}
+	thresh := fpDivInt(s, 10)
+	m := 0
+	for cmpAbs(xx, thresh) > 0 && m < 4096 {
+		x2 := fpMul(xx, xx, s)
+		rt := fpSqrt(bigAdd(s, x2), s)
+		xx = fpDiv(xx, bigAdd(s, rt), s)
+		m++
+	}
+	sum := xx
+	term := xx
+	x2 := fpMul(xx, xx, s)
+	var k uint32 = 1
+	for term.sign != 0 && k < 200000 {
+		term = fpMul(term, x2, s)
+		term.sign = -term.sign
+		sum = bigAdd(sum, fpDivInt(term, 2*k+1))
+		k++
+	}
+	for i := 0; i < m; i++ {
+		sum = bigAdd(sum, sum)
+	}
+	if neg {
+		sum.sign = -sum.sign
+	}
+	return sum
+}
+func fpAsin(x, s, pi Big) (Big, bool) {
+	ax := x
+	if len(ax.d) == 0 {
+		ax.sign = 0
+	} else {
+		ax.sign = 1
+	}
+	c := cmpAbs(ax, s)
+	if c > 0 {
+		return Big{}, false
+	}
+	if c == 0 {
+		h := fpDivInt(pi, 2)
+		if x.sign < 0 {
+			h.sign = -h.sign
+		}
+		return h, true
+	}
+	d := bigSub(s, fpMul(x, x, s))
+	return fpAtan(fpDiv(x, fpSqrt(d, s), s), s), true
+}
+func fpAcos(x, s, pi Big) (Big, bool) {
+	a, ok := fpAsin(x, s, pi)
+	if !ok {
+		return Big{}, false
+	}
+	return bigSub(fpDivInt(pi, 2), a), true
+}
+func fpSinh(x, s Big) Big { nx := x; nx.sign = -nx.sign; return fpDivInt(bigSub(fpExp(x, s), fpExp(nx, s)), 2) }
+func fpCosh(x, s Big) Big { nx := x; nx.sign = -nx.sign; return fpDivInt(bigAdd(fpExp(x, s), fpExp(nx, s)), 2) }
+func fpTanh(x, s Big) Big {
+	nx := x
+	nx.sign = -nx.sign
+	e1 := fpExp(x, s)
+	e2 := fpExp(nx, s)
+	return fpDiv(bigSub(e1, e2), bigAdd(e1, e2), s)
+}
+
 func buildFP() FP {
 	scale := pow10(WP)
 	pi := fpParseConst(PI_STR, scale)
@@ -982,6 +1055,22 @@ func main() {
 				stack = append(stack, a)
 				continue
 			}
+			if name == "fact" {
+				if !bigIsOne(a.den) || a.num.sign < 0 || bigCmp(a.num, bigSetInt(20000)) > 0 {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				var nn int64
+				if len(a.num.d) > 0 {
+					nn = int64(a.num.d[0])
+				}
+				f := bigOne()
+				for i := int64(2); i <= nn; i++ {
+					f = bigMul(f, bigSetInt(i))
+				}
+				stack = append(stack, Rat{f, bigOne(), a.inexact})
+				continue
+			}
 			c := fpc()
 			x := fpFromRat(a.num, a.den, c.scale)
 			var y Big
@@ -1018,6 +1107,33 @@ func main() {
 					return
 				}
 				y = fpDiv(sn, co, c.scale)
+			case "asin":
+				v, ok := fpAsin(x, c.scale, c.pi)
+				if !ok {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = v
+			case "acos":
+				v, ok := fpAcos(x, c.scale, c.pi)
+				if !ok {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = v
+			case "atan":
+				y = fpAtan(x, c.scale)
+			case "sinh":
+				y = fpSinh(x, c.scale)
+			case "cosh":
+				y = fpCosh(x, c.scale)
+			case "tanh":
+				y = fpTanh(x, c.scale)
+			case "rad":
+				y = fpMul(x, fpDivInt(c.pi, 180), c.scale)
+			case "deg":
+				f180 := fpFromRat(bigSetInt(180), bigOne(), c.scale)
+				y = fpDiv(fpMul(x, f180, c.scale), c.pi, c.scale)
 			case "cbrt":
 				if x.sign == 0 {
 					y = zero()
