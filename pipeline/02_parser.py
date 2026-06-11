@@ -74,7 +74,7 @@ def main() -> None:
             return {"op": "pow", "l": base, "r": parse_unary()}
         return base
 
-    # atom := NUM | '(' expr ')'
+    # atom := NUM | '(' expr ')' | IDENT [ '(' expr ')' ]
     def parse_atom():
         tp = peek()
         if tp == "LPAREN":
@@ -84,6 +84,14 @@ def main() -> None:
             return inner
         if tp == "NUM":
             return {"num": advance()[1]}
+        if tp == "IDENT":
+            name = advance()[1]
+            if peek() == "LPAREN":
+                advance()
+                arg = parse_expr()
+                expect("RPAREN")
+                return {"func": name, "x": arg}
+            return {"const": name}
         sys.exit(f"parse error: unexpected token {tp}")
 
     ast = parse_expr()

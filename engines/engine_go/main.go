@@ -480,8 +480,285 @@ func bigPow(base, e Big) Big {
 	return result
 }
 
-// ---- exact rationals ----
-type Rat struct{ num, den Big }
+// ---- more bignum helpers + significant-digit rounding ----
+func bigSetInt(v int64) Big {
+	if v == 0 {
+		return zero()
+	}
+	neg := v < 0
+	var uv uint64
+	if neg {
+		uv = uint64(-v)
+	} else {
+		uv = uint64(v)
+	}
+	var d []uint32
+	for uv > 0 {
+		d = append(d, uint32(uv&0xffffffff))
+		uv >>= 32
+	}
+	s := 1
+	if neg {
+		s = -1
+	}
+	return Big{s, d}
+}
+func bigCmp(a, b Big) int { return bigSub(a, b).sign }
+func pow10(k int) Big      { return bigPow(bigFromSmall(10), bigSetInt(int64(k))) }
+
+func bigIsqrt(n Big) Big {
+	if n.sign == 0 {
+		return zero()
+	}
+	top := len(n.d)*32 - 1
+	for top >= 0 && (n.d[top>>5]>>uint(top&31))&1 == 0 {
+		top--
+	}
+	half := top/2 + 1
+	x := Big{1, make([]uint32, half/32+1)}
+	x.d[half/32] = 1 << uint(half%32)
+	for i := 0; i < 2000; i++ {
+		q, _, _ := bigDivmod(n, x)
+		s := bigAdd(x, q)
+		nx, _ := divmodSmall(s, 2)
+		if bigCmp(nx, x) >= 0 {
+			break
+		}
+		x = nx
+	}
+	for i := 0; i < 4; i++ {
+		if bigCmp(bigMul(x, x), n) <= 0 {
+			break
+		}
+		x = bigSub(x, bigOne())
+	}
+	return x
+}
+
+func cmp10eDenNum(e int, den, num Big) int {
+	if e >= 0 {
+		return bigCmp(bigMul(pow10(e), den), num)
+	}
+	return bigCmp(den, bigMul(pow10(-e), num))
+}
+
+func roundSigRat(numIn, denIn Big, n int) (Big, Big) {
+	if numIn.sign == 0 {
+		return zero(), bigOne()
+	}
+	sign := numIn.sign
+	num := numIn.clone()
+	num.sign = 1
+	den := denIn.clone()
+	den.sign = 1
+	e := len(toDec(num)) - len(toDec(den))
+	for {
+		if cmp10eDenNum(e, den, num) > 0 {
+			e--
+			continue
+		}
+		if cmp10eDenNum(e+1, den, num) <= 0 {
+			e++
+			continue
+		}
+		break
+	}
+	scale := n - 1 - e
+	var snum, sden Big
+	if scale >= 0 {
+		snum = bigMul(num, pow10(scale))
+		sden = den
+	} else {
+		snum = num
+		sden = bigMul(den, pow10(-scale))
+	}
+	q, r, _ := bigDivmod(snum, sden)
+	twoR := bigAdd(r, r)
+	c := bigCmp(twoR, sden)
+	if c > 0 || (c == 0 && len(q.d) > 0 && q.d[0]&1 == 1) {
+		q = bigAdd(q, bigOne())
+	}
+	ex := e - n + 1
+	var rnum, rden Big
+	if ex >= 0 {
+		rnum = bigMul(q, pow10(ex))
+		rden = bigOne()
+	} else {
+		rnum = q
+		rden = pow10(-ex)
+	}
+	if len(rnum.d) == 0 {
+		rnum.sign = 0
+	} else {
+		rnum.sign = sign
+	}
+	return rnum, rden
+}
+
+// ---- fixed-point transcendental functions ----
+const WP = 120
+const FUNC_SIG = 80
+const OUT_SIG = 50
+const PI_STR = "3.14159265358979323846264338327950288419716939937510" +
+	"5820974944592307816406286208998628034825342117067982148086513282306647093844609550582231725359408128"
+
+type FP struct{ scale, pi, twoPi, ln2, ln10, e Big }
+
+var fpVal FP
+var fpReady bool
+
+func fpc() *FP {
+	if !fpReady {
+		fpVal = buildFP()
+		fpReady = true
+	}
+	return &fpVal
+}
+
+func fpFromRat(num, den, s Big) Big { q, _, _ := bigDivmod(bigMul(num, s), den); return q }
+func fpMul(a, b, s Big) Big         { q, _, _ := bigDivmod(bigMul(a, b), s); return q }
+func fpDiv(a, b, s Big) Big         { q, _, _ := bigDivmod(bigMul(a, s), b); return q }
+func fpDivInt(a Big, k uint32) Big {
+	aa := a.clone()
+	neg := aa.sign < 0
+	if len(aa.d) == 0 {
+		aa.sign = 0
+	} else {
+		aa.sign = 1
+	}
+	q, _ := divmodSmall(aa, k)
+	if neg {
+		q.sign = -q.sign
+	}
+	return q
+}
+func fpParseConst(s string, sc Big) Big {
+	ip, fp := s, ""
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		ip = s[:i]
+		fp = s[i+1:]
+	}
+	return fpFromRat(fromDec(ip+fp), pow10(len(fp)), sc)
+}
+func fpAtanh(y, s Big) Big {
+	sum, term := y, y
+	y2 := fpMul(y, y, s)
+	var k uint32 = 1
+	for term.sign != 0 && k < 200000 {
+		term = fpMul(term, y2, s)
+		sum = bigAdd(sum, fpDivInt(term, 2*k+1))
+		k++
+	}
+	return sum
+}
+func fpExp(x, s Big) Big {
+	r := x
+	m := 0
+	for {
+		a := r
+		if len(a.d) == 0 {
+			a.sign = 0
+		} else {
+			a.sign = 1
+		}
+		if cmpAbs(a, s) < 0 || m > 8192 {
+			break
+		}
+		r = fpDivInt(r, 2)
+		m++
+	}
+	sum, term := s, s
+	var k uint32 = 1
+	for term.sign != 0 && k < 200000 {
+		term = fpDivInt(fpMul(term, r, s), k)
+		sum = bigAdd(sum, term)
+		k++
+	}
+	for i := 0; i < m; i++ {
+		sum = fpMul(sum, sum, s)
+	}
+	return sum
+}
+func fpLn(x, s, ln2 Big) Big {
+	xx := x
+	e2 := 0
+	twoS := bigAdd(s, s)
+	for cmpAbs(xx, twoS) >= 0 {
+		xx = fpDivInt(xx, 2)
+		e2++
+	}
+	for cmpAbs(xx, s) < 0 {
+		xx = bigAdd(xx, xx)
+		e2--
+	}
+	y := fpDiv(bigSub(xx, s), bigAdd(xx, s), s)
+	at := fpAtanh(y, s)
+	return bigAdd(bigAdd(at, at), bigMul(ln2, bigSetInt(int64(e2))))
+}
+func roundFpToInt(v, s Big) Big {
+	q, r, _ := bigDivmod(v, s)
+	ar := r
+	if len(ar.d) == 0 {
+		ar.sign = 0
+	} else {
+		ar.sign = 1
+	}
+	if bigCmp(bigAdd(ar, ar), s) >= 0 {
+		d := int64(1)
+		if v.sign < 0 {
+			d = -1
+		}
+		return bigAdd(q, bigSetInt(d))
+	}
+	return q
+}
+func fpReduce(x, s, twoPi Big) Big {
+	k := roundFpToInt(fpDiv(x, twoPi, s), s)
+	return bigSub(x, bigMul(k, twoPi))
+}
+func fpSin(x, s, twoPi Big) Big {
+	xr := fpReduce(x, s, twoPi)
+	sum, term := xr, xr
+	x2 := fpMul(xr, xr, s)
+	var k uint32 = 1
+	for term.sign != 0 && k < 200000 {
+		term = fpDivInt(fpMul(term, x2, s), (2*k)*(2*k+1))
+		term.sign = -term.sign
+		sum = bigAdd(sum, term)
+		k++
+	}
+	return sum
+}
+func fpCos(x, s, twoPi Big) Big {
+	xr := fpReduce(x, s, twoPi)
+	sum, term := s, s
+	x2 := fpMul(xr, xr, s)
+	var k uint32 = 1
+	for term.sign != 0 && k < 200000 {
+		term = fpDivInt(fpMul(term, x2, s), (2*k-1)*(2*k))
+		term.sign = -term.sign
+		sum = bigAdd(sum, term)
+		k++
+	}
+	return sum
+}
+func buildFP() FP {
+	scale := pow10(WP)
+	pi := fpParseConst(PI_STR, scale)
+	twoPi := bigAdd(pi, pi)
+	at := fpAtanh(fpDivInt(scale, 3), scale)
+	ln2 := bigAdd(at, at)
+	tenfp := fpFromRat(bigFromSmall(10), bigOne(), scale)
+	ln10 := fpLn(tenfp, scale, ln2)
+	e := fpExp(scale, scale)
+	return FP{scale, pi, twoPi, ln2, ln10, e}
+}
+
+// ---- exact rationals (with an inexact flag for function-tainted values) ----
+type Rat struct {
+	num, den Big
+	inexact  bool
+}
 
 func ratNorm(r *Rat) {
 	if r.num.sign == 0 {
@@ -503,29 +780,25 @@ func ratNorm(r *Rat) {
 func ratParse(s string) Rat {
 	var r Rat
 	if i := strings.IndexByte(s, '/'); i >= 0 {
-		r = Rat{fromDec(s[:i]), fromDec(s[i+1:])}
+		r = Rat{fromDec(s[:i]), fromDec(s[i+1:]), false}
 	} else {
-		r = Rat{fromDec(s), bigOne()}
+		r = Rat{fromDec(s), bigOne(), false}
 	}
 	ratNorm(&r)
 	return r
 }
 func ratAdd(a, b Rat) Rat {
-	n := bigAdd(bigMul(a.num, b.den), bigMul(b.num, a.den))
-	d := bigMul(a.den, b.den)
-	r := Rat{n, d}
+	r := Rat{bigAdd(bigMul(a.num, b.den), bigMul(b.num, a.den)), bigMul(a.den, b.den), a.inexact || b.inexact}
 	ratNorm(&r)
 	return r
 }
 func ratSub(a, b Rat) Rat {
-	n := bigSub(bigMul(a.num, b.den), bigMul(b.num, a.den))
-	d := bigMul(a.den, b.den)
-	r := Rat{n, d}
+	r := Rat{bigSub(bigMul(a.num, b.den), bigMul(b.num, a.den)), bigMul(a.den, b.den), a.inexact || b.inexact}
 	ratNorm(&r)
 	return r
 }
 func ratMul(a, b Rat) Rat {
-	r := Rat{bigMul(a.num, b.num), bigMul(a.den, b.den)}
+	r := Rat{bigMul(a.num, b.num), bigMul(a.den, b.den), a.inexact || b.inexact}
 	ratNorm(&r)
 	return r
 }
@@ -533,35 +806,34 @@ func ratDiv(a, b Rat) (Rat, bool) {
 	if b.num.sign == 0 {
 		return Rat{}, false
 	}
-	r := Rat{bigMul(a.num, b.den), bigMul(a.den, b.num)}
+	r := Rat{bigMul(a.num, b.den), bigMul(a.den, b.num), a.inexact || b.inexact}
 	ratNorm(&r)
 	return r, true
 }
 func ratIdiv(a, b Rat) (Rat, bool) {
-	nn := bigMul(a.num, b.den)
 	dd := bigMul(a.den, b.num)
 	if dd.sign == 0 {
 		return Rat{}, false
 	}
-	q, _, _ := bigDivmod(nn, dd)
-	return Rat{q, bigOne()}, true
+	q, _, _ := bigDivmod(bigMul(a.num, b.den), dd)
+	return Rat{q, bigOne(), a.inexact || b.inexact}, true
 }
 func ratMod(a, b Rat) (Rat, bool) {
 	t, ok := ratIdiv(a, b)
 	if !ok {
 		return Rat{}, false
 	}
-	bt := ratMul(b, t)
-	return ratSub(a, bt), true
+	return ratSub(a, ratMul(b, t)), true
 }
 
-// ratPow return code: 1 ok, 0 div-by-zero, -1 non-integer exponent (Layer B)
+// ratPow return code: 1 ok, 0 div-by-zero, -1 non-integer exponent (caller handles)
 func ratPow(a, b Rat) (Rat, int) {
 	if !bigIsOne(b.den) {
 		return Rat{}, -1
 	}
+	inx := a.inexact || b.inexact
 	if b.num.sign == 0 {
-		return Rat{bigOne(), bigOne()}, 1
+		return Rat{bigOne(), bigOne(), inx}, 1
 	}
 	m := b.num.clone()
 	m.sign = 1
@@ -569,15 +841,21 @@ func ratPow(a, b Rat) (Rat, int) {
 	pd := bigPow(a.den, m)
 	var r Rat
 	if b.num.sign > 0 {
-		r = Rat{pn, pd}
+		r = Rat{pn, pd, inx}
 	} else {
 		if a.num.sign == 0 {
 			return Rat{}, 0
 		}
-		r = Rat{pd, pn}
+		r = Rat{pd, pn, inx}
 	}
 	ratNorm(&r)
 	return r, 1
+}
+func ratFromFp(v Big) Rat {
+	n, d := roundSigRat(v, fpc().scale, FUNC_SIG)
+	r := Rat{n, d, true}
+	ratNorm(&r)
+	return r
 }
 func ratToString(r Rat) string {
 	if r.num.sign == 0 {
@@ -678,6 +956,79 @@ func main() {
 		case "NEG":
 			n := len(stack)
 			stack[n-1].num.sign = -stack[n-1].num.sign
+		case "CONST":
+			c := fpc()
+			v := c.e
+			if parts[1] == "pi" {
+				v = c.pi
+			}
+			stack = append(stack, ratFromFp(v))
+		case "FUNC":
+			name := parts[1]
+			n := len(stack)
+			a := stack[n-1]
+			stack = stack[:n-1]
+			if name == "abs" {
+				a.num.sign = 0
+				if len(a.num.d) > 0 {
+					a.num.sign = 1
+				}
+				stack = append(stack, a)
+				continue
+			}
+			c := fpc()
+			x := fpFromRat(a.num, a.den, c.scale)
+			var y Big
+			switch name {
+			case "sqrt":
+				if x.sign < 0 {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = bigIsqrt(bigMul(x, c.scale))
+			case "exp":
+				y = fpExp(x, c.scale)
+			case "ln":
+				if x.sign <= 0 {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = fpLn(x, c.scale, c.ln2)
+			case "log", "log10":
+				if x.sign <= 0 {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = fpDiv(fpLn(x, c.scale, c.ln2), c.ln10, c.scale)
+			case "sin":
+				y = fpSin(x, c.scale, c.twoPi)
+			case "cos":
+				y = fpCos(x, c.scale, c.twoPi)
+			case "tan":
+				sn := fpSin(x, c.scale, c.twoPi)
+				co := fpCos(x, c.scale, c.twoPi)
+				if co.sign == 0 {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = fpDiv(sn, co, c.scale)
+			case "cbrt":
+				if x.sign == 0 {
+					y = zero()
+				} else {
+					ax := x
+					neg := ax.sign < 0
+					ax.sign = 1
+					y = fpExp(fpDivInt(fpLn(ax, c.scale, c.ln2), 3), c.scale)
+					if neg {
+						y.sign = -y.sign
+					}
+				}
+			default:
+				stack = append(stack, a)
+				continue
+			}
+			stack = append(stack, ratFromFp(y))
 		default:
 			n := len(stack)
 			b := stack[n-1]
@@ -718,11 +1069,27 @@ func main() {
 					os.Stdout.WriteString("ERR:DIVZERO\n")
 					return
 				}
-				if code < 0 {
-					os.Stdout.WriteString("ERR:NONINT\n")
-					return
+				if code < 0 { // non-integer exponent: a^b = exp(b ln a)
+					c := fpc()
+					if a.num.sign < 0 {
+						os.Stdout.WriteString("ERR:DOMAIN\n")
+						return
+					}
+					if a.num.sign == 0 {
+						if b.num.sign <= 0 {
+							os.Stdout.WriteString("ERR:DOMAIN\n")
+							return
+						}
+						res = Rat{zero(), bigOne(), true}
+					} else {
+						bb := fpFromRat(a.num, a.den, c.scale)
+						eb := fpFromRat(b.num, b.den, c.scale)
+						y := fpExp(fpMul(eb, fpLn(bb, c.scale, c.ln2), c.scale), c.scale)
+						res = ratFromFp(y)
+					}
+				} else {
+					res = r
 				}
-				res = r
 			default:
 				stack = append(stack, a, b)
 				continue
@@ -734,5 +1101,13 @@ func main() {
 		os.Stderr.WriteString("engine_go: empty stack\n")
 		os.Exit(4)
 	}
-	os.Stdout.WriteString(ratToString(stack[len(stack)-1]) + "\n")
+	top := stack[len(stack)-1]
+	if top.inexact {
+		n, d := roundSigRat(top.num, top.den, OUT_SIG)
+		r2 := Rat{n, d, true}
+		ratNorm(&r2)
+		os.Stdout.WriteString(ratToString(r2) + "\n")
+	} else {
+		os.Stdout.WriteString(ratToString(top) + "\n")
+	}
 }

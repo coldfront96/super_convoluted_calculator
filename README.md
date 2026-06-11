@@ -97,17 +97,40 @@ bignums, so `0.1 + 0.2` is exactly `0.3` and `1/3 * 3` is exactly `1`. Supports:
 | `/` | exact division | `1 / 3` → `1/3`, `7 / 2` → `3.5` |
 | `//` | integer division (toward zero) | `7 // 2` → `3` |
 | `%` | remainder (sign of dividend) | `100 % 7` → `2` |
-| `^` | integer exponent (right-assoc) | `2 ^ 3 ^ 2` → `512`, `(1/2)^3` → `0.125` |
+| `^` | power (right-assoc; non-integer exponents via the function layer) | `2 ^ 3 ^ 2` → `512`, `(1/2)^3` → `0.125`, `2^(1/2)` → `1.414…` |
 
 Decimal (`3.14`) and scientific (`1.5e-2`) literals are read exactly. Output is
 canonical: an integer, a terminating decimal, or a reduced fraction `p/q`.
-Division by zero exits 3; non-integer exponents (e.g. `2^(1/2)`) await the
-function layer and exit 5.
+Division by zero exits 3; a function argument outside its domain exits 6.
 
-The four rational engines (C, Rust, Go, Java) build this on their gate-level
-bignum: `NAND → 64-bit ALU → bignum → rational`. The Bash engine stays a bounded
-64-bit *integer* gate engine — it agrees on whole-number results within 64 bits
-and is outvoted by the quorum on fractions or overflow.
+### Functions (the irrational layer)
+
+`sqrt cbrt exp ln log/log10 sin cos tan abs`, plus constants `pi` and `e`, and
+non-integer powers like `2^(1/2)`. Trig is in **radians**. These can't be exact,
+so a value that passes through a function is tagged *inexact* and printed rounded
+to **50 significant digits**; pure rational results stay exact.
+
+```
+sqrt(2)            -> 1.4142135623730950488016887242096980785696718753769
+sqrt(2) * sqrt(2)  -> 2
+sin(pi/2)          -> 1
+sin(1)^2 + cos(1)^2-> 1
+exp(ln(5))         -> 5
+8 ^ (1/3)          -> 2
+1/3 + 1/6          -> 0.5        (still exact — no function involved)
+```
+
+Each function is computed at high precision and **correctly rounded to 80 sig
+digits** before re-entering exact rational arithmetic, so the four engines agree
+to the displayed 50 digits. Independence is preserved: each engine reimplements
+the transcendentals itself (gate-level fixed-point on C/Rust/Go, `BigInteger`
+fixed-point on Java) — they are not sharing one library, only a numeric spec.
+
+The four rational engines (C, Rust, Go, Java) build everything on their bignum:
+`NAND → 64-bit ALU → bignum → rational → fixed-point functions`. The Bash engine
+stays a bounded 64-bit *integer* gate engine — it agrees on whole-number results
+within 64 bits and is outvoted by the quorum on fractions, overflow, or any
+function.
 
 The four big engines (C, Rust, Go, Java) are genuinely unbounded. Each gate
 engine builds bignum arithmetic as a third layer **on top of** its 64-bit gate
@@ -164,6 +187,8 @@ make all                       # build the engines + the HTTP sidecar
 ./calc "1/3 + 1/6"             # -> 0.5
 ./calc "0.1 + 0.2"             # -> 0.3   (exact, not 0.30000000000000004)
 ./calc "2 ^ 100"               # -> 1267650600228229401496703205376
+./calc "sqrt(2)"               # -> 1.4142135623730950488016887242096980785696718753769
+./calc "sin(pi/2) + ln(e)"     # -> 2
 ./calc --report "1/3"          # full JSON render (value/exact/approx/roman/words)
 ./calc --service "6 * 7"       # same answer, but over an HTTP microservice mesh
 ./calc "1 / 0"; echo $?        # -> error on stderr, exit code 3

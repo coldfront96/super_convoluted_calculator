@@ -46,6 +46,11 @@ def emit(node, out)
   if node.key?('num')
     n, d = literal_to_rational(node['num'])
     out << "PUSH #{n}/#{d}"
+  elsif node.key?('const')
+    out << "CONST #{node['const']}"
+  elsif node.key?('func')
+    emit(node['x'], out)
+    out << "FUNC #{node['func']}"
   elsif node['op'] == 'neg'
     emit(node['x'], out)
     out << 'NEG'

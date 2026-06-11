@@ -28,6 +28,7 @@ my $idx = 0;
 while ($src =~ m{
         \G\s*
         ( //                                               # integer division
+        | [A-Za-z][A-Za-z0-9]*                             # sqrt, sin, pi, e ...
         | [0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?              # 12, 3.14, 1e9, 2.5e-3
         | \.[0-9]+(?:[eE][+-]?[0-9]+)?                     # .5, .25e3
         | [-+*/%()^] )
@@ -35,6 +36,8 @@ while ($src =~ m{
     my $tok = $1;
     if ($tok =~ /^[0-9.]/) {
         print "$idx,NUM,$tok\n";
+    } elsif ($tok =~ /^[A-Za-z]/) {
+        print "$idx,IDENT,$tok\n";
     } elsif ($tok eq '//') {
         print "$idx,IDIV,\n";
     } else {

@@ -30,13 +30,22 @@ Same input → same correct output, every time. No randomness in the answer.
 
 ## Rule 6 — It stays a calculator
 Real expression in, real answer out. Supports `+ - * / // % ^`, parentheses,
-unary minus, decimal and scientific literals, and correct precedence. Numbers are
-**exact arbitrary-precision rationals** (p/q of bignums): `/` is exact division,
-`//` truncates toward zero, `%` takes the dividend's sign, `^` is integer
-exponentiation. Output is canonical: integer, terminating decimal, or reduced
-fraction. The four rational engines (C/Rust/Go/Java) are exact; the Bash engine
-is a bounded 64-bit integer gate engine that the Byzantine quorum outvotes
-whenever a result overflows 64 bits or isn't a whole number.
+unary minus, decimal/scientific literals, the functions
+`sqrt cbrt exp ln log sin cos tan abs` and constants `pi`/`e`, with correct
+precedence. Rational results are **exact arbitrary-precision** (p/q of bignums):
+`/` exact division, `//` truncates toward zero, `%` takes the dividend's sign,
+integer `^` exact. Irrational results (functions, non-integer powers) are
+computed at high precision, correctly rounded to 80 significant digits internally
+and displayed to 50; trig is in radians. Output is canonical: integer,
+terminating decimal, or reduced fraction (exact), or a 50-sig-digit decimal
+(inexact). The four rational engines (C/Rust/Go/Java) carry all of this; the Bash
+engine is a bounded 64-bit integer gate engine that the Byzantine quorum outvotes
+whenever a result overflows 64 bits, isn't a whole number, or needs a function.
+
+## Rule 8 — Exactness is tracked, never faked
+A value is "inexact" only once a transcendental function or non-integer power has
+touched it. Such taint propagates through arithmetic. A result that can be exact
+(pure rational) must be printed exactly — `1/3 + 1/6` is `0.5`, not `0.4999…`.
 
 ## Rule 7 — Maximize convolution within Rules 1–6
 Subject to everything above, make it as unnecessarily complicated as humanly

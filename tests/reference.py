@@ -2,26 +2,46 @@
 # ============================================================================
 # THE ORACLE OF TRUTH  (independent reference implementation)
 # ----------------------------------------------------------------------------
-# Decides what the correct answer IS, using Python's exact Fraction. Mirrors the
-# calculator's semantics: exact rationals; `/` exact division; `//` integer
-# division truncating toward zero; `%` remainder with the dividend's sign; `^`
-# integer exponentiation; decimals and scientific notation as exact rationals.
-# Canonical output: integer | terminating decimal | reduced fraction p/q.
+# Decides the correct answer. Numbers are exact Fractions tagged exact/inexact.
+# Pure rational results print exactly (integer | terminating decimal | p/q).
+# Anything touched by a transcendental function (sqrt, trig, ln, exp, ...) or a
+# non-integer power becomes inexact and prints rounded to 50 significant digits.
+# The transcendental spec lives in funcs.py (stdlib `decimal`, no external deps).
 #
 # Modes:
 #   reference.py "<expr>"     -> print the correct answer
 #   reference.py --cases      -> curated  "expr\tanswer" lines
 #   reference.py --gen N      -> random rational "expr\tanswer" lines
 #   reference.py --gen-big N  -> random BIG integer "expr\tanswer" lines
+#   reference.py --gen-fn N   -> random function "expr\tanswer" lines
 # ============================================================================
 import sys
+import os
 import re
 import random
 from fractions import Fraction
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from funcs import (call_func, const, pow_inexact, round_sig_fraction,
+                   DomainError, OUT_SIG)
+
+FUNCS = {"sqrt", "cbrt", "exp", "ln", "log", "log10", "sin", "cos", "tan", "abs"}
+CONSTS = {"pi", "e"}
+
 TOKEN = re.compile(
-    r"\s*(//|[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?|[-+*/%()^])"
+    r"\s*(//|[A-Za-z][A-Za-z0-9]*"
+    r"|[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?"
+    r"|[-+*/%()^])"
 )
+
+
+# ---- value model: (Fraction, inexact) ----
+class V:
+    __slots__ = ("f", "x")
+
+    def __init__(self, f, x=False):
+        self.f = f
+        self.x = x
 
 
 def lit_to_fraction(s):
@@ -62,11 +82,11 @@ class Parser:
             if s[i].isspace():
                 i += 1
                 continue
-            m = TOKEN.match(s, i)
-            if not m:
-                raise ValueError(f"bad token at {i!r}")
-            self.toks.append(m.group(1))
-            i = m.end()
+            mt = TOKEN.match(s, i)
+            if not mt:
+                raise ValueError(f"bad token at {i}")
+            self.toks.append(mt.group(1))
+            i = mt.end()
         self.p = 0
 
     def peek(self):
@@ -82,7 +102,7 @@ class Parser:
         while self.peek() in ("+", "-"):
             op = self.nxt()
             r = self.term()
-            v = v + r if op == "+" else v - r
+            v = V(v.f + r.f if op == "+" else v.f - r.f, v.x or r.x)
         return v
 
     def term(self):
@@ -91,22 +111,23 @@ class Parser:
             op = self.nxt()
             r = self.unary()
             if op == "*":
-                v = v * r
+                v = V(v.f * r.f, v.x or r.x)
             elif op == "/":
-                if r == 0:
+                if r.f == 0:
                     raise ZeroDivisionError
-                v = v / r
+                v = V(v.f / r.f, v.x or r.x)
             elif op == "//":
-                v = trunc_div(v, r)
+                v = V(trunc_div(v.f, r.f), v.x or r.x)
             else:
-                v = v - r * trunc_div(v, r)
+                v = V(v.f - r.f * trunc_div(v.f, r.f), v.x or r.x)
         return v
 
     def unary(self):
         t = self.peek()
         if t == "-":
             self.nxt()
-            return -self.unary()
+            u = self.unary()
+            return V(-u.f, u.x)
         if t == "+":
             self.nxt()
             return self.unary()
@@ -117,14 +138,14 @@ class Parser:
         if self.peek() == "^":
             self.nxt()
             e = self.unary()
-            if e.denominator != 1:
-                raise ValueError("non-integer exponent")
-            n = e.numerator
-            if n == 0:
-                return Fraction(1)
-            if n < 0 and base == 0:
-                raise ZeroDivisionError
-            return base ** n
+            if e.f.denominator == 1:           # integer exponent -> exact power
+                n = e.f.numerator
+                if n == 0:
+                    return V(Fraction(1), base.x or e.x)
+                if n < 0 and base.f == 0:
+                    raise ZeroDivisionError
+                return V(base.f ** n, base.x or e.x)
+            return V(pow_inexact(base.f, e.f), True)   # non-integer exponent
         return base
 
     def atom(self):
@@ -137,12 +158,24 @@ class Parser:
             self.nxt()
             return v
         if t is not None and (t[0].isdigit() or t[0] == "."):
-            return lit_to_fraction(self.nxt())
+            return V(lit_to_fraction(self.nxt()), False)
+        if t is not None and t[0].isalpha():
+            name = self.nxt()
+            if self.peek() == "(":
+                self.nxt()
+                arg = self.expr()
+                if self.peek() != ")":
+                    raise ValueError("missing )")
+                self.nxt()
+                if name == "abs":
+                    return V(abs(arg.f), arg.x)   # abs preserves exactness
+                if name not in FUNCS:
+                    raise ValueError(f"unknown function {name}")
+                return V(call_func("log10" if name == "log" else name, arg.f), True)
+            if name in CONSTS:
+                return V(const(name), True)
+            raise ValueError(f"unknown name {name}")
         raise ValueError(f"unexpected token {t}")
-
-
-def evaluate(s):
-    return Parser(s).expr()
 
 
 def canon(fr: Fraction) -> str:
@@ -168,6 +201,16 @@ def canon(fr: Fraction) -> str:
         frac = frac.rstrip("0")
         return ("-" if N < 0 else "") + intp + ("." + frac if frac else "")
     return f"{p}/{q}"
+
+
+def render(v: V) -> str:
+    if v.x:
+        return canon(round_sig_fraction(v.f, OUT_SIG))
+    return canon(v.f)
+
+
+def evaluate(s):
+    return render(Parser(s).expr())
 
 
 # ---- generators ----
@@ -204,44 +247,68 @@ def gen_big(rng, depth=0):
     return f"({gen_big(rng, depth + 1)}){op}({gen_big(rng, depth + 1)})"
 
 
+# function args kept in safe, non-pathological ranges
+def gen_fn_arg(rng):
+    r = rng.random()
+    if r < 0.5:
+        return f"{rng.randint(1, 20)}.{rng.randint(0, 999)}"
+    if r < 0.8:
+        return str(rng.randint(1, 50))
+    return f"0.{rng.randint(1, 999)}"
+
+
+def gen_fn(rng, depth=0):
+    if depth >= 2 or rng.random() < 0.5:
+        kind = rng.random()
+        if kind < 0.4:
+            fn = rng.choice(["sqrt", "exp", "ln", "log", "sin", "cos", "tan", "cbrt"])
+            return f"{fn}({gen_fn_arg(rng)})"
+        if kind < 0.55:
+            return rng.choice(["pi", "e"])
+        return gen_fn_arg(rng)
+    op = rng.choice(["+", "-", "*", "/"])
+    left = gen_fn(rng, depth + 1)
+    right = gen_fn(rng, depth + 1)
+    if op == "/":
+        return f"({left}){op}({gen_fn_arg(rng)})"
+    return f"({left}){op}({right})"
+
+
 CURATED = [
-    "1 + 2", "2 + 2", "10 - 3", "6 * 7", "-5 + 3", "-(4 + 6)",
-    "2 * (3 + 4)", "(1 + 2) * (3 + 4)", "1 + 2 * 3 - 4 // 2",
-    # exact division and fractions
-    "1 / 2", "1 / 3", "7 / 2", "-7 / 2", "1 / 3 + 1 / 6", "2 / 4",
-    "3.14 * 2", "0.1 + 0.2", "0.5 * 0.5", "10 / 4", "1 / 3 * 3",
-    "(1 / 3 + 1 / 3 + 1 / 3)", ".25 + .75", "100 / 7", "22 / 7",
-    # integer division / modulo
-    "7 // 2", "-7 // 2", "100 // 7", "100 % 7", "7 % -3", "-7 % 3",
-    # powers
-    "2 ^ 10", "2 ^ 0", "2 ^ -1", "(1 / 2) ^ 3", "(-3) ^ 3", "-3 ^ 2",
-    "10 ^ 20", "2 ^ 3 ^ 2", "(2 / 3) ^ -2",
-    # scientific + big
-    "1e3 + 1", "1.5e-2 * 4", "1000000000000000000 * 1000000000000000000",
-    "123456789012345678901234567890 + 1", "0",
+    "1 + 2", "6 * 7", "1 / 2", "1 / 3", "7 / 2", "1 / 3 + 1 / 6", "0.1 + 0.2",
+    "3.14 * 2", "7 // 2", "100 % 7", "2 ^ 10", "2 ^ 0", "2 ^ -1", "(1 / 2) ^ 3",
+    "-3 ^ 2", "2 ^ 3 ^ 2", "1e3 + 1", "1000000000000000000 * 1000000000000000000",
+    # ---- function layer ----
+    "sqrt(2)", "sqrt(4)", "sqrt(2) * sqrt(2)", "sqrt(9) + 1", "cbrt(27)",
+    "exp(0)", "exp(1)", "ln(e)", "ln(1)", "log(1000)", "log10(100)",
+    "sin(0)", "cos(0)", "tan(0)", "sin(pi / 2)", "cos(pi)", "tan(pi / 4)",
+    "pi", "e", "2 * pi", "pi * 2 + 1", "abs(-5)", "abs(-1 / 3)", "abs(3.5)",
+    "2 ^ (1 / 2)", "4 ^ 0.5", "8 ^ (1 / 3)", "exp(ln(5))", "sqrt(2) + 1 / 3",
+    "sin(1) ^ 2 + cos(1) ^ 2", "ln(exp(3))", "10 ^ 0.5",
 ]
 
 
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--cases":
         for e in CURATED:
-            print(f"{e}\t{canon(evaluate(e))}")
+            print(f"{e}\t{evaluate(e)}")
         return
-    if len(sys.argv) >= 3 and sys.argv[1] in ("--gen", "--gen-big"):
-        big = sys.argv[1] == "--gen-big"
+    if len(sys.argv) >= 3 and sys.argv[1] in ("--gen", "--gen-big", "--gen-fn"):
+        mode = sys.argv[1]
         n = int(sys.argv[2])
-        rng = random.Random(4242 if big else 1337)
+        rng = random.Random({"--gen": 1337, "--gen-big": 4242, "--gen-fn": 271828}[mode])
+        gfn = {"--gen": gen, "--gen-big": gen_big, "--gen-fn": gen_fn}[mode]
         out = 0
         while out < n:
-            e = gen_big(rng) if big else gen(rng)
+            e = gfn(rng)
             try:
-                v = canon(evaluate(e))
-            except (ZeroDivisionError, ValueError):
+                v = evaluate(e)
+            except (ZeroDivisionError, ValueError, DomainError):
                 continue
             print(f"{e}\t{v}")
             out += 1
         return
-    print(canon(evaluate(" ".join(sys.argv[1:]))))
+    print(evaluate(" ".join(sys.argv[1:])))
 
 
 if __name__ == "__main__":

@@ -150,6 +150,10 @@ if [[ "$verdict" == "ERR:NONINT" ]]; then
     echo "Error: non-integer exponents require the (not-yet-built) function layer." >&2
     exit 5
 fi
+if [[ "$verdict" == "ERR:DOMAIN" ]]; then
+    echo "Error: function argument outside its domain (e.g. sqrt/ln of a negative)." >&2
+    exit 6
+fi
 
 # ---- STAGE 6: render & cross-verify ----
 if [[ $SERVICE -eq 0 ]]; then

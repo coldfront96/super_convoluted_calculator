@@ -306,9 +306,179 @@ fn big_pow(base: &Big, e: &Big) -> Big {
     result
 }
 
-// ---- exact rationals ----
+// ---- more bignum helpers + significant-digit rounding ----
+use std::sync::OnceLock;
+
+fn big_set_int(v: i64) -> Big {
+    if v == 0 { return Big::zero(); }
+    let neg = v < 0;
+    let mut uv: u128 = if neg { (v as i128).unsigned_abs() } else { v as u128 };
+    let mut d = vec![];
+    while uv > 0 { d.push((uv & 0xffffffff) as u32); uv >>= 32; }
+    Big { sign: if neg { -1 } else { 1 }, d }
+}
+fn big_cmp(a: &Big, b: &Big) -> i32 { big_sub(a, b).sign }
+fn pow10(k: i64) -> Big { big_pow(&big_from_small(10), &big_set_int(k)) }
+
+fn big_isqrt(n: &Big) -> Big {
+    if n.sign == 0 { return Big::zero(); }
+    let bits = n.d.len() * 32;
+    let mut top: i64 = bits as i64 - 1;
+    while top >= 0 && (n.d[(top as usize) >> 5] >> ((top as usize) & 31)) & 1 == 0 { top -= 1; }
+    let half = (top / 2 + 1) as usize;
+    let mut x = Big { sign: 1, d: vec![0u32; half / 32 + 1] };
+    x.d[half / 32] = 1u32 << (half % 32);
+    for _ in 0..2000 {
+        let (q, _) = big_divmod(n, &x).unwrap();
+        let s = big_add(&x, &q);
+        let (nx, _) = divmod_small(&s, 2);
+        if big_cmp(&nx, &x) >= 0 { break; }
+        x = nx;
+    }
+    for _ in 0..4 {
+        let sq = big_mul(&x, &x);
+        if big_cmp(&sq, n) <= 0 { break; }
+        x = big_sub(&x, &big_one());
+    }
+    x
+}
+
+fn cmp_10e_den_num(e: i64, den: &Big, num: &Big) -> i32 {
+    if e >= 0 { big_cmp(&big_mul(&pow10(e), den), num) }
+    else { big_cmp(den, &big_mul(&pow10(-e), num)) }
+}
+
+fn round_sig_rat(num_in: &Big, den_in: &Big, n: i64) -> (Big, Big) {
+    if num_in.sign == 0 { return (Big::zero(), big_one()); }
+    let sign = num_in.sign;
+    let mut num = num_in.clone(); num.sign = 1;
+    let mut den = den_in.clone(); den.sign = 1;
+    let mut e = to_dec(&num).len() as i64 - to_dec(&den).len() as i64;
+    loop {
+        if cmp_10e_den_num(e, &den, &num) > 0 { e -= 1; continue; }
+        if cmp_10e_den_num(e + 1, &den, &num) <= 0 { e += 1; continue; }
+        break;
+    }
+    let scale = n - 1 - e;
+    let (snum, sden) = if scale >= 0 { (big_mul(&num, &pow10(scale)), den.clone()) }
+                       else { (num.clone(), big_mul(&den, &pow10(-scale))) };
+    let (mut q, r) = big_divmod(&snum, &sden).unwrap();
+    let two_r = big_add(&r, &r);
+    let c = big_cmp(&two_r, &sden);
+    if c > 0 || (c == 0 && !q.d.is_empty() && (q.d[0] & 1) == 1) { q = big_add(&q, &big_one()); }
+    let ex = e - n + 1;
+    let (mut rnum, rden) = if ex >= 0 { (big_mul(&q, &pow10(ex)), big_one()) } else { (q, pow10(-ex)) };
+    rnum.sign = if rnum.d.is_empty() { 0 } else { sign };
+    (rnum, rden)
+}
+
+// ---- fixed-point transcendental functions ----
+const WP: i64 = 120;
+const FUNC_SIG: i64 = 80;
+const OUT_SIG: i64 = 50;
+const PI_STR: &str = "3.14159265358979323846264338327950288419716939937510\
+5820974944592307816406286208998628034825342117067982148086513282306647093844609550582231725359408128";
+
+struct FP { scale: Big, pi: Big, two_pi: Big, ln2: Big, ln10: Big, e: Big }
+static FPC: OnceLock<FP> = OnceLock::new();
+fn fpc() -> &'static FP { FPC.get_or_init(build_fp) }
+
+fn fp_from_rat(num: &Big, den: &Big, s: &Big) -> Big { big_divmod(&big_mul(num, s), den).unwrap().0 }
+fn fp_mul(a: &Big, b: &Big, s: &Big) -> Big { big_divmod(&big_mul(a, b), s).unwrap().0 }
+fn fp_div(a: &Big, b: &Big, s: &Big) -> Big { big_divmod(&big_mul(a, s), b).unwrap().0 }
+fn fp_div_int(a: &Big, k: u32) -> Big {
+    let mut aa = a.clone(); let neg = aa.sign < 0; aa.sign = if aa.d.is_empty() { 0 } else { 1 };
+    let (mut q, _) = divmod_small(&aa, k); if neg { q.sign = -q.sign; } q
+}
+fn fp_parse_const(s: &str, sc: &Big) -> Big {
+    let (ip, fp) = match s.find('.') { Some(i) => (&s[..i], &s[i + 1..]), None => (s, "") };
+    let num = from_dec(&format!("{}{}", ip, fp));
+    fp_from_rat(&num, &pow10(fp.len() as i64), sc)
+}
+fn fp_atanh(y: &Big, s: &Big) -> Big {
+    let mut sum = y.clone(); let mut term = y.clone(); let y2 = fp_mul(y, y, s);
+    let mut k: u32 = 1;
+    while term.sign != 0 && k < 200000 {
+        term = fp_mul(&term, &y2, s);
+        sum = big_add(&sum, &fp_div_int(&term, 2 * k + 1));
+        k += 1;
+    }
+    sum
+}
+fn fp_exp(x: &Big, s: &Big) -> Big {
+    let mut r = x.clone(); let mut m = 0;
+    loop {
+        let mut a = r.clone(); a.sign = if a.d.is_empty() { 0 } else { 1 };
+        if cmp_abs(&a, s) < 0 || m > 8192 { break; }
+        r = fp_div_int(&r, 2); m += 1;
+    }
+    let mut sum = s.clone(); let mut term = s.clone(); let mut k: u32 = 1;
+    while term.sign != 0 && k < 200000 {
+        let t = fp_mul(&term, &r, s); term = fp_div_int(&t, k); sum = big_add(&sum, &term); k += 1;
+    }
+    for _ in 0..m { sum = fp_mul(&sum, &sum, s); }
+    sum
+}
+fn fp_ln(x: &Big, s: &Big, ln2: &Big) -> Big {
+    let mut xx = x.clone(); let mut e2: i64 = 0;
+    let two_s = big_add(s, s);
+    while cmp_abs(&xx, &two_s) >= 0 { xx = fp_div_int(&xx, 2); e2 += 1; }
+    while cmp_abs(&xx, s) < 0 { xx = big_add(&xx, &xx); e2 -= 1; }
+    let y = fp_div(&big_sub(&xx, s), &big_add(&xx, s), s);
+    let at = fp_atanh(&y, s);
+    big_add(&big_add(&at, &at), &big_mul(ln2, &big_set_int(e2)))
+}
+fn round_fp_to_int(v: &Big, s: &Big) -> Big {
+    let (q, r) = big_divmod(v, s).unwrap();
+    let mut ar = r.clone(); ar.sign = if ar.d.is_empty() { 0 } else { 1 };
+    if big_cmp(&big_add(&ar, &ar), s) >= 0 { big_add(&q, &big_set_int(if v.sign < 0 { -1 } else { 1 })) } else { q }
+}
+fn fp_reduce(x: &Big, s: &Big, two_pi: &Big) -> Big {
+    let k = round_fp_to_int(&fp_div(x, two_pi, s), s);
+    big_sub(x, &big_mul(&k, two_pi))
+}
+fn fp_sin(x: &Big, s: &Big, two_pi: &Big) -> Big {
+    let xr = fp_reduce(x, s, two_pi);
+    let mut sum = xr.clone(); let mut term = xr.clone(); let x2 = fp_mul(&xr, &xr, s);
+    let mut k: u32 = 1;
+    while term.sign != 0 && k < 200000 {
+        let t = fp_mul(&term, &x2, s);
+        term = fp_div_int(&t, (2 * k) * (2 * k + 1));
+        term.sign = -term.sign;
+        sum = big_add(&sum, &term);
+        k += 1;
+    }
+    sum
+}
+fn fp_cos(x: &Big, s: &Big, two_pi: &Big) -> Big {
+    let xr = fp_reduce(x, s, two_pi);
+    let mut sum = s.clone(); let mut term = s.clone(); let x2 = fp_mul(&xr, &xr, s);
+    let mut k: u32 = 1;
+    while term.sign != 0 && k < 200000 {
+        let t = fp_mul(&term, &x2, s);
+        term = fp_div_int(&t, (2 * k - 1) * (2 * k));
+        term.sign = -term.sign;
+        sum = big_add(&sum, &term);
+        k += 1;
+    }
+    sum
+}
+fn build_fp() -> FP {
+    let scale = pow10(WP);
+    let pi = fp_parse_const(PI_STR, &scale);
+    let two_pi = big_add(&pi, &pi);
+    let third = fp_div_int(&scale, 3);
+    let at = fp_atanh(&third, &scale);
+    let ln2 = big_add(&at, &at);
+    let tenfp = fp_from_rat(&big_from_small(10), &big_one(), &scale);
+    let ln10 = fp_ln(&tenfp, &scale, &ln2);
+    let e = fp_exp(&scale, &scale);
+    FP { scale, pi, two_pi, ln2, ln10, e }
+}
+
+// ---- exact rationals (with an inexact flag for function-tainted values) ----
 #[derive(Clone)]
-struct Rat { num: Big, den: Big }
+struct Rat { num: Big, den: Big, inexact: bool }
 
 fn rat_norm(r: &mut Rat) {
     if r.num.sign == 0 { r.den = big_one(); return; }
@@ -321,59 +491,64 @@ fn rat_norm(r: &mut Rat) {
 }
 fn rat_parse(s: &str) -> Rat {
     let mut r = if let Some(i) = s.find('/') {
-        Rat { num: from_dec(&s[..i]), den: from_dec(&s[i + 1..]) }
+        Rat { num: from_dec(&s[..i]), den: from_dec(&s[i + 1..]), inexact: false }
     } else {
-        Rat { num: from_dec(s), den: big_one() }
+        Rat { num: from_dec(s), den: big_one(), inexact: false }
     };
     rat_norm(&mut r);
     r
 }
 fn rat_add(a: &Rat, b: &Rat) -> Rat {
     let n = big_add(&big_mul(&a.num, &b.den), &big_mul(&b.num, &a.den));
-    let d = big_mul(&a.den, &b.den);
-    let mut r = Rat { num: n, den: d }; rat_norm(&mut r); r
+    let mut r = Rat { num: n, den: big_mul(&a.den, &b.den), inexact: a.inexact || b.inexact };
+    rat_norm(&mut r); r
 }
 fn rat_sub(a: &Rat, b: &Rat) -> Rat {
     let n = big_sub(&big_mul(&a.num, &b.den), &big_mul(&b.num, &a.den));
-    let d = big_mul(&a.den, &b.den);
-    let mut r = Rat { num: n, den: d }; rat_norm(&mut r); r
+    let mut r = Rat { num: n, den: big_mul(&a.den, &b.den), inexact: a.inexact || b.inexact };
+    rat_norm(&mut r); r
 }
 fn rat_mul(a: &Rat, b: &Rat) -> Rat {
-    let mut r = Rat { num: big_mul(&a.num, &b.num), den: big_mul(&a.den, &b.den) };
+    let mut r = Rat { num: big_mul(&a.num, &b.num), den: big_mul(&a.den, &b.den), inexact: a.inexact || b.inexact };
     rat_norm(&mut r); r
 }
 fn rat_div(a: &Rat, b: &Rat) -> Option<Rat> {
     if b.num.sign == 0 { return None; }
-    let mut r = Rat { num: big_mul(&a.num, &b.den), den: big_mul(&a.den, &b.num) };
+    let mut r = Rat { num: big_mul(&a.num, &b.den), den: big_mul(&a.den, &b.num), inexact: a.inexact || b.inexact };
     rat_norm(&mut r); Some(r)
 }
 fn rat_idiv(a: &Rat, b: &Rat) -> Option<Rat> {
-    let nn = big_mul(&a.num, &b.den);
     let dd = big_mul(&a.den, &b.num);
     if dd.sign == 0 { return None; }
-    let (q, _) = big_divmod(&nn, &dd)?;
-    Some(Rat { num: q, den: big_one() })
+    let (q, _) = big_divmod(&big_mul(&a.num, &b.den), &dd)?;
+    Some(Rat { num: q, den: big_one(), inexact: a.inexact || b.inexact })
 }
 fn rat_mod(a: &Rat, b: &Rat) -> Option<Rat> {
     let t = rat_idiv(a, b)?;
-    let bt = rat_mul(b, &t);
-    Some(rat_sub(a, &bt))
+    Some(rat_sub(a, &rat_mul(b, &t)))
 }
-// Ok(rat); Err(0)=div-by-zero; Err(-1)=non-integer exponent (Layer B)
+// Ok(rat); Err(0)=div-by-zero; Err(-1)=non-integer exponent (handled by caller)
 fn rat_pow(a: &Rat, b: &Rat) -> Result<Rat, i32> {
     if !big_is_one(&b.den) { return Err(-1); }
-    if b.num.sign == 0 { return Ok(Rat { num: big_one(), den: big_one() }); }
+    let inx = a.inexact || b.inexact;
+    if b.num.sign == 0 { return Ok(Rat { num: big_one(), den: big_one(), inexact: inx }); }
     let mut m = b.num.clone(); m.sign = 1;
     let pn = big_pow(&a.num, &m);
     let pd = big_pow(&a.den, &m);
     let mut r = if b.num.sign > 0 {
-        Rat { num: pn, den: pd }
+        Rat { num: pn, den: pd, inexact: inx }
     } else {
         if a.num.sign == 0 { return Err(0); }
-        Rat { num: pd, den: pn }
+        Rat { num: pd, den: pn, inexact: inx }
     };
     rat_norm(&mut r);
     Ok(r)
+}
+fn rat_from_fp(v: &Big) -> Rat {
+    let (n, d) = round_sig_rat(v, &fpc().scale, FUNC_SIG);
+    let mut r = Rat { num: n, den: d, inexact: true };
+    rat_norm(&mut r);
+    r
 }
 fn rat_to_string(r: &Rat) -> String {
     if r.num.sign == 0 { return "0".to_string(); }
@@ -430,6 +605,38 @@ fn main() {
         match op {
             "PUSH" => stack.push(rat_parse(parts.next().unwrap())),
             "NEG" => { let n = stack.len(); stack[n - 1].num.sign = -stack[n - 1].num.sign; }
+            "CONST" => {
+                let c = fpc();
+                let v = if parts.next() == Some("pi") { &c.pi } else { &c.e };
+                stack.push(rat_from_fp(v));
+            }
+            "FUNC" => {
+                let name = parts.next().unwrap();
+                let a = stack.pop().unwrap();
+                if name == "abs" {
+                    let mut r = a.clone();
+                    r.num.sign = if r.num.d.is_empty() { 0 } else { 1 };
+                    stack.push(r);
+                    continue;
+                }
+                let c = fpc();
+                let x = fp_from_rat(&a.num, &a.den, &c.scale);
+                let y = match name {
+                    "sqrt" => { if x.sign < 0 { println!("ERR:DOMAIN"); return; } big_isqrt(&big_mul(&x, &c.scale)) }
+                    "exp" => fp_exp(&x, &c.scale),
+                    "ln" => { if x.sign <= 0 { println!("ERR:DOMAIN"); return; } fp_ln(&x, &c.scale, &c.ln2) }
+                    "log" | "log10" => { if x.sign <= 0 { println!("ERR:DOMAIN"); return; } fp_div(&fp_ln(&x, &c.scale, &c.ln2), &c.ln10, &c.scale) }
+                    "sin" => fp_sin(&x, &c.scale, &c.two_pi),
+                    "cos" => fp_cos(&x, &c.scale, &c.two_pi),
+                    "tan" => { let s = fp_sin(&x, &c.scale, &c.two_pi); let co = fp_cos(&x, &c.scale, &c.two_pi); if co.sign == 0 { println!("ERR:DOMAIN"); return; } fp_div(&s, &co, &c.scale) }
+                    "cbrt" => {
+                        if x.sign == 0 { Big::zero() }
+                        else { let mut ax = x.clone(); let neg = ax.sign < 0; ax.sign = 1; let mut y = fp_exp(&fp_div_int(&fp_ln(&ax, &c.scale, &c.ln2), 3), &c.scale); if neg { y.sign = -y.sign; } y }
+                    }
+                    _ => { stack.push(a); continue; }
+                };
+                stack.push(rat_from_fp(&y));
+            }
             _ => {
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
@@ -443,7 +650,19 @@ fn main() {
                     "POW" => match rat_pow(&a, &b) {
                         Ok(x) => x,
                         Err(0) => { println!("ERR:DIVZERO"); return; }
-                        Err(_) => { println!("ERR:NONINT"); return; }
+                        Err(_) => {                       // non-integer exponent: exp(b ln a)
+                            let c = fpc();
+                            if a.num.sign < 0 { println!("ERR:DOMAIN"); return; }
+                            if a.num.sign == 0 {
+                                if b.num.sign <= 0 { println!("ERR:DOMAIN"); return; }
+                                Rat { num: Big::zero(), den: big_one(), inexact: true }
+                            } else {
+                                let bb = fp_from_rat(&a.num, &a.den, &c.scale);
+                                let eb = fp_from_rat(&b.num, &b.den, &c.scale);
+                                let y = fp_exp(&fp_mul(&eb, &fp_ln(&bb, &c.scale, &c.ln2), &c.scale), &c.scale);
+                                rat_from_fp(&y)
+                            }
+                        }
                     },
                     _ => { stack.push(a); stack.push(b); continue; }
                 };
@@ -451,5 +670,13 @@ fn main() {
             }
         }
     }
-    println!("{}", rat_to_string(stack.last().expect("engine_rust: empty stack")));
+    let top = stack.last().expect("engine_rust: empty stack");
+    if top.inexact {
+        let (n, d) = round_sig_rat(&top.num, &top.den, OUT_SIG);
+        let mut r2 = Rat { num: n, den: d, inexact: true };
+        rat_norm(&mut r2);
+        println!("{}", rat_to_string(&r2));
+    } else {
+        println!("{}", rat_to_string(top));
+    }
 }

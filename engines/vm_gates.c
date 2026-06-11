@@ -320,9 +320,208 @@ static void big_pow(const Big *base, const Big *e, Big *out) {
     big_copy(&result, out);
 }
 
+/* a few more small helpers used by the rounding / function layer */
+static void big_set_int(Big *r, long v) {
+    if (v == 0) { big_zero(r); return; }
+    int neg = v < 0;
+    unsigned long uv = neg ? (unsigned long)(-(v + 1)) + 1UL : (unsigned long)v;
+    r->n = 0;
+    while (uv) { r->d[r->n++] = (uint32_t)(uv & 0xffffffffUL); uv >>= 32; }
+    r->sign = neg ? -1 : 1;
+}
+static int big_cmp(const Big *a, const Big *b) { Big t; big_sub(a, b, &t); return t.sign; }
+static void pow10(int k, Big *out) {
+    Big ten, kk; big_set_small(&ten, 10); big_set_int(&kk, k); big_pow(&ten, &kk, out);
+}
+static void big_isqrt(const Big *N, Big *out) {
+    if (N->sign == 0) { big_zero(out); return; }
+    int top = N->n * 32 - 1;
+    while (top >= 0 && !((N->d[top >> 5] >> (top & 31)) & 1)) top--;
+    int half = top / 2 + 1;
+    Big x; big_zero(&x); x.n = (half >> 5) + 1;
+    for (int i = 0; i < x.n; i++) x.d[i] = 0;
+    x.d[half >> 5] = 1u << (half & 31); x.sign = 1;
+    for (int it = 0; it < 2000; it++) {
+        Big q, r; big_divmod(N, &x, &q, &r);
+        Big s; big_add(&x, &q, &s);
+        Big nx; divmod_small(&s, 2, &nx);
+        if (big_cmp(&nx, &x) >= 0) break;
+        big_copy(&nx, &x);
+    }
+    for (int i = 0; i < 4; i++) {
+        Big sq; big_mul(&x, &x, &sq);
+        if (big_cmp(&sq, N) <= 0) break;
+        Big one, t; big_one(&one); big_sub(&x, &one, &t); big_copy(&t, &x);
+    }
+    big_copy(&x, out);
+}
+
+/* sign of (10^E * den - num), valid for negative E too (no fractional powers) */
+static int cmp_10E_den_num(int E, const Big *den, const Big *num) {
+    Big p, t;
+    if (E >= 0) { pow10(E, &p); big_mul(&p, den, &t); return big_cmp(&t, num); }
+    pow10(-E, &p); big_mul(&p, num, &t); return big_cmp(den, &t);
+}
+
+/* round |num/den| to n significant digits (round-half-even) -> rnum/rden */
+static void round_sig_rat(const Big *numIn, const Big *denIn, int n, Big *rnum, Big *rden) {
+    if (numIn->sign == 0) { big_zero(rnum); big_one(rden); return; }
+    int sign = numIn->sign;
+    Big num; big_copy(numIn, &num); num.sign = 1;
+    Big den; big_copy(denIn, &den); den.sign = 1;
+    char nb[LIMBS * 10], db[LIMBS * 10];
+    to_dec(&num, nb); to_dec(&den, db);
+    int E = (int)strlen(nb) - (int)strlen(db);
+    for (;;) {
+        if (cmp_10E_den_num(E, &den, &num) > 0) { E--; continue; }
+        if (cmp_10E_den_num(E + 1, &den, &num) <= 0) { E++; continue; }
+        break;
+    }
+    int scale = n - 1 - E;
+    Big snum, sden;
+    if (scale >= 0) { Big p; pow10(scale, &p); big_mul(&num, &p, &snum); big_copy(&den, &sden); }
+    else { big_copy(&num, &snum); Big p; pow10(-scale, &p); big_mul(&den, &p, &sden); }
+    Big q, r; big_divmod(&snum, &sden, &q, &r);
+    Big two_r; big_add(&r, &r, &two_r);
+    int c = big_cmp(&two_r, &sden), up = 0;
+    if (c > 0) up = 1;
+    else if (c == 0 && q.n > 0 && (q.d[0] & 1)) up = 1;
+    if (up) { Big one, t; big_one(&one); big_add(&q, &one, &t); big_copy(&t, &q); }
+    int ex = E - n + 1;
+    if (ex >= 0) { Big p; pow10(ex, &p); big_mul(&q, &p, rnum); big_one(rden); }
+    else { big_copy(&q, rnum); pow10(-ex, rden); }
+    rnum->sign = rnum->n ? sign : 0;
+}
+
+/* ============== LAYER 3.6: fixed-point transcendental functions ========= */
+#define WP 120          /* fixed-point working precision (fractional digits) */
+#define FUNC_SIG 80     /* function results rounded to this many sig digits */
+#define OUT_SIG 50      /* inexact answers displayed to this many sig digits */
+static const char *PI_STR =
+    "3.14159265358979323846264338327950288419716939937510"
+    "58209749445923078164062862089986280348253421170679"
+    "82148086513282306647093844609550582231725359408128";
+static Big SCALE, FP_PI, FP_2PI, FP_LN2, FP_LN10, FP_E;
+static int FP_INIT = 0;
+
+static void fp_from_rat(const Big *num, const Big *den, Big *out) {
+    Big t, q, r; big_mul(num, &SCALE, &t); big_divmod(&t, den, &q, &r); big_copy(&q, out);
+}
+static void fp_mul(const Big *a, const Big *b, Big *out) {
+    Big t, q, r; big_mul(a, b, &t); big_divmod(&t, &SCALE, &q, &r); big_copy(&q, out);
+}
+static void fp_div(const Big *a, const Big *b, Big *out) {
+    Big t, q, r; big_mul(a, &SCALE, &t); big_divmod(&t, b, &q, &r); big_copy(&q, out);
+}
+static void fp_div_int(const Big *a, uint32_t k, Big *out) {
+    Big aa; big_copy(a, &aa); int neg = aa.sign < 0; aa.sign = aa.n ? 1 : 0;
+    Big q; divmod_small(&aa, k, &q); if (neg) q.sign = -q.sign; big_copy(&q, out);
+}
+static void fp_parse_const(const char *s, Big *out) {
+    char buf[512]; strncpy(buf, s, sizeof buf - 1); buf[sizeof buf - 1] = '\0';
+    char *dot = strchr(buf, '.');
+    Big num, den;
+    if (dot) {
+        char tmp[512]; *dot = '\0';
+        strcpy(tmp, buf); strcat(tmp, dot + 1);
+        from_dec(tmp, &num); pow10((int)strlen(dot + 1), &den);
+    } else { from_dec(buf, &num); big_one(&den); }
+    fp_from_rat(&num, &den, out);
+}
+static void fp_atanh(const Big *y, Big *out) {
+    Big sum, term, y2; big_copy(y, &sum); big_copy(y, &term); fp_mul(y, y, &y2);
+    uint32_t k = 1;
+    while (term.sign != 0 && k < 200000) {
+        Big t; fp_mul(&term, &y2, &t); big_copy(&t, &term);
+        Big d; fp_div_int(&term, 2 * k + 1, &d);
+        Big s; big_add(&sum, &d, &s); big_copy(&s, &sum);
+        k++;
+    }
+    big_copy(&sum, out);
+}
+static void fp_exp(const Big *x, Big *out) {
+    Big r; big_copy(x, &r); int m = 0;
+    for (;;) {
+        Big a; big_copy(&r, &a); a.sign = a.n ? 1 : 0;
+        if (cmp_abs(&a, &SCALE) < 0 || m > 8192) break;
+        Big h; fp_div_int(&r, 2, &h); big_copy(&h, &r); m++;
+    }
+    Big sum, term; big_copy(&SCALE, &sum); big_copy(&SCALE, &term);
+    uint32_t k = 1;
+    while (term.sign != 0 && k < 200000) {
+        Big t; fp_mul(&term, &r, &t); fp_div_int(&t, k, &term);
+        Big s; big_add(&sum, &term, &s); big_copy(&s, &sum);
+        k++;
+    }
+    for (int i = 0; i < m; i++) { Big t; fp_mul(&sum, &sum, &t); big_copy(&t, &sum); }
+    big_copy(&sum, out);
+}
+static void fp_ln(const Big *x, Big *out) {
+    Big X; big_copy(x, &X); int e2 = 0;
+    Big two_scale; big_add(&SCALE, &SCALE, &two_scale);
+    while (cmp_abs(&X, &two_scale) >= 0) { Big h; fp_div_int(&X, 2, &h); big_copy(&h, &X); e2++; }
+    while (cmp_abs(&X, &SCALE) < 0) { Big t; big_add(&X, &X, &t); big_copy(&t, &X); e2--; }
+    Big numy, deny, y; big_sub(&X, &SCALE, &numy); big_add(&X, &SCALE, &deny); fp_div(&numy, &deny, &y);
+    Big at, lnfrac; fp_atanh(&y, &at); big_add(&at, &at, &lnfrac);
+    Big e2b, tmp, res; big_set_int(&e2b, e2); big_mul(&FP_LN2, &e2b, &tmp); big_add(&lnfrac, &tmp, &res);
+    big_copy(&res, out);
+}
+static void round_fp_to_int(const Big *v, Big *out) {
+    Big q, r; big_divmod(v, &SCALE, &q, &r);
+    Big ar; big_copy(&r, &ar); ar.sign = ar.n ? 1 : 0;
+    Big two_ar; big_add(&ar, &ar, &two_ar);
+    if (big_cmp(&two_ar, &SCALE) >= 0) {
+        Big one; big_set_int(&one, v->sign < 0 ? -1 : 1);
+        Big t; big_add(&q, &one, &t); big_copy(&t, out);
+    } else big_copy(&q, out);
+}
+static void fp_reduce_2pi(const Big *x, Big *out) {
+    Big d; fp_div(x, &FP_2PI, &d);
+    Big k; round_fp_to_int(&d, &k);
+    Big kfp; big_mul(&k, &FP_2PI, &kfp);
+    Big r; big_sub(x, &kfp, &r); big_copy(&r, out);
+}
+static void fp_sin(const Big *x, Big *out) {
+    Big xr; fp_reduce_2pi(x, &xr);
+    Big sum, term, x2; big_copy(&xr, &sum); big_copy(&xr, &term); fp_mul(&xr, &xr, &x2);
+    uint32_t k = 1;
+    while (term.sign != 0 && k < 200000) {
+        Big t; fp_mul(&term, &x2, &t);
+        fp_div_int(&t, (2 * k) * (2 * k + 1), &term);
+        term.sign = -term.sign;
+        Big s; big_add(&sum, &term, &s); big_copy(&s, &sum);
+        k++;
+    }
+    big_copy(&sum, out);
+}
+static void fp_cos(const Big *x, Big *out) {
+    Big xr; fp_reduce_2pi(x, &xr);
+    Big sum, term, x2; big_copy(&SCALE, &sum); big_copy(&SCALE, &term); fp_mul(&xr, &xr, &x2);
+    uint32_t k = 1;
+    while (term.sign != 0 && k < 200000) {
+        Big t; fp_mul(&term, &x2, &t);
+        fp_div_int(&t, (2 * k - 1) * (2 * k), &term);
+        term.sign = -term.sign;
+        Big s; big_add(&sum, &term, &s); big_copy(&s, &sum);
+        k++;
+    }
+    big_copy(&sum, out);
+}
+static void fp_init(void) {
+    if (FP_INIT) return; FP_INIT = 1;
+    pow10(WP, &SCALE);
+    fp_parse_const(PI_STR, &FP_PI);
+    big_add(&FP_PI, &FP_PI, &FP_2PI);
+    Big third, at; fp_div_int(&SCALE, 3, &third); fp_atanh(&third, &at); big_add(&at, &at, &FP_LN2);
+    Big ten, one, tenfp; big_set_small(&ten, 10); big_one(&one); fp_from_rat(&ten, &one, &tenfp);
+    fp_ln(&tenfp, &FP_LN10);
+    fp_exp(&SCALE, &FP_E);
+}
+
 /* ====================== LAYER 3.5: exact rationals ====================== */
-/* A rational is num/den, kept reduced with den > 0; zero is 0/1. */
-typedef struct { Big num, den; } Rat;
+/* A rational is num/den, kept reduced with den > 0; zero is 0/1. inexact marks
+ * values that have passed through a transcendental function. */
+typedef struct { Big num, den; int inexact; } Rat;
 
 static void rat_norm(Rat *r) {
     if (r->num.sign == 0) { big_one(&r->den); return; }
@@ -342,7 +541,7 @@ static void rat_add(const Rat *a, const Rat *b, Rat *o) {
     big_mul(&b->num, &a->den, &t2);
     big_add(&t1, &t2, &n);
     big_mul(&a->den, &b->den, &d);
-    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); o->inexact = a->inexact | b->inexact; rat_norm(o);
 }
 static void rat_sub(const Rat *a, const Rat *b, Rat *o) {
     Big t1, t2, n, d;
@@ -350,36 +549,41 @@ static void rat_sub(const Rat *a, const Rat *b, Rat *o) {
     big_mul(&b->num, &a->den, &t2);
     big_sub(&t1, &t2, &n);
     big_mul(&a->den, &b->den, &d);
-    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); o->inexact = a->inexact | b->inexact; rat_norm(o);
 }
 static void rat_mul(const Rat *a, const Rat *b, Rat *o) {
     Big n, d; big_mul(&a->num, &b->num, &n); big_mul(&a->den, &b->den, &d);
-    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); o->inexact = a->inexact | b->inexact; rat_norm(o);
 }
 static int rat_div(const Rat *a, const Rat *b, Rat *o) {
     if (b->num.sign == 0) return 0;
     Big n, d; big_mul(&a->num, &b->den, &n); big_mul(&a->den, &b->num, &d);
-    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o); return 1;
+    big_copy(&n, &o->num); big_copy(&d, &o->den); o->inexact = a->inexact | b->inexact; rat_norm(o); return 1;
 }
 static int rat_idiv(const Rat *a, const Rat *b, Rat *o) {
     Big N, D; big_mul(&a->num, &b->den, &N); big_mul(&a->den, &b->num, &D);
     if (D.sign == 0) return 0;
     Big q, r; big_divmod(&N, &D, &q, &r);
-    rat_set_int(o, &q); return 1;
+    rat_set_int(o, &q); o->inexact = a->inexact | b->inexact; return 1;
 }
 static int rat_mod(const Rat *a, const Rat *b, Rat *o) {
     Rat t; if (!rat_idiv(a, b, &t)) return 0;
-    Rat bt; rat_mul(b, &t, &bt); rat_sub(a, &bt, o); return 1;
+    Rat bt; rat_mul(b, &t, &bt); rat_sub(a, &bt, o); o->inexact = a->inexact | b->inexact; return 1;
 }
-/* returns 1 ok, 0 div-by-zero, -1 non-integer exponent (deferred to Layer B) */
+/* returns 1 ok, 0 div-by-zero, -1 non-integer exponent (handled by caller) */
 static int rat_pow(const Rat *a, const Rat *b, Rat *o) {
     if (!big_is_one(&b->den)) return -1;
-    if (b->num.sign == 0) { big_one(&o->num); big_one(&o->den); return 1; }
+    if (b->num.sign == 0) { big_one(&o->num); big_one(&o->den); o->inexact = a->inexact | b->inexact; return 1; }
     Big m; big_copy(&b->num, &m); m.sign = 1;
     Big pn, pd; big_pow(&a->num, &m, &pn); big_pow(&a->den, &m, &pd);
     if (b->num.sign > 0) { big_copy(&pn, &o->num); big_copy(&pd, &o->den); }
     else { if (a->num.sign == 0) return 0; big_copy(&pd, &o->num); big_copy(&pn, &o->den); }
-    rat_norm(o); return 1;
+    o->inexact = a->inexact | b->inexact; rat_norm(o); return 1;
+}
+/* wrap a fixed-point value into an inexact rational, rounded to FUNC_SIG sig. */
+static void rat_from_fp(const Big *v, Rat *o) {
+    Big rn, rd; round_sig_rat(v, &SCALE, FUNC_SIG, &rn, &rd);
+    big_copy(&rn, &o->num); big_copy(&rd, &o->den); o->inexact = 1; rat_norm(o);
 }
 
 /* canonical string: integer | terminating decimal | reduced fraction p/q */
@@ -430,7 +634,7 @@ static void rat_parse(const char *operand, Rat *r) {
     char *slash = strchr(buf, '/');
     if (slash) { *slash = '\0'; from_dec(buf, &r->num); from_dec(slash + 1, &r->den); }
     else { from_dec(buf, &r->num); big_one(&r->den); }
-    rat_norm(r);
+    r->inexact = 0; rat_norm(r);
 }
 
 /* ====================== LAYER 4: the stack VM =========================== */
@@ -455,6 +659,35 @@ int main(int argc, char **argv) {
             rat_parse(operand, &stack[sp]); sp++;
         } else if (!strcmp(op, "NEG")) {
             stack[sp - 1].num.sign = -stack[sp - 1].num.sign;
+        } else if (!strcmp(op, "CONST")) {
+            fp_init();
+            Big v;
+            if (!strcmp(operand, "pi")) big_copy(&FP_PI, &v);
+            else big_copy(&FP_E, &v);
+            rat_from_fp(&v, &stack[sp]); sp++;
+        } else if (!strcmp(op, "FUNC")) {
+            fp_init();
+            Rat a = stack[--sp];
+            if (!strcmp(operand, "abs")) {
+                a.num.sign = a.num.n ? 1 : 0;     /* abs preserves exactness */
+                stack[sp] = a; sp++;
+                continue;
+            }
+            Big X; fp_from_rat(&a.num, &a.den, &X);
+            Big Y; int dom = 0;
+            if (!strcmp(operand, "sqrt")) { if (X.sign < 0) dom = 1; else { Big t; big_mul(&X, &SCALE, &t); big_isqrt(&t, &Y); } }
+            else if (!strcmp(operand, "exp")) fp_exp(&X, &Y);
+            else if (!strcmp(operand, "ln")) { if (X.sign <= 0) dom = 1; else fp_ln(&X, &Y); }
+            else if (!strcmp(operand, "log") || !strcmp(operand, "log10")) { if (X.sign <= 0) dom = 1; else { Big l; fp_ln(&X, &l); fp_div(&l, &FP_LN10, &Y); } }
+            else if (!strcmp(operand, "sin")) fp_sin(&X, &Y);
+            else if (!strcmp(operand, "cos")) fp_cos(&X, &Y);
+            else if (!strcmp(operand, "tan")) { Big s, c; fp_sin(&X, &s); fp_cos(&X, &c); if (c.sign == 0) dom = 1; else fp_div(&s, &c, &Y); }
+            else if (!strcmp(operand, "cbrt")) {
+                if (X.sign == 0) big_zero(&Y);
+                else { Big ax; big_copy(&X, &ax); int neg = ax.sign < 0; ax.sign = 1; Big l, l3; fp_ln(&ax, &l); fp_div_int(&l, 3, &l3); fp_exp(&l3, &Y); if (neg) Y.sign = -Y.sign; }
+            } else { sp++; continue; }
+            if (dom) { printf("ERR:DOMAIN\n"); return 0; }
+            rat_from_fp(&Y, &stack[sp]); sp++;
         } else {
             Rat b = stack[--sp];
             Rat a = stack[--sp];
@@ -468,7 +701,20 @@ int main(int argc, char **argv) {
             else if (!strcmp(op, "POW")) {
                 int pr = rat_pow(&a, &b, &res);
                 if (pr == 0) { printf("ERR:DIVZERO\n"); return 0; }
-                if (pr < 0) { printf("ERR:NONINT\n"); return 0; }
+                if (pr < 0) {                       /* non-integer exponent: a^b = exp(b ln a) */
+                    fp_init();
+                    if (a.num.sign < 0) { printf("ERR:DOMAIN\n"); return 0; }
+                    if (a.num.sign == 0) {
+                        if (b.num.sign <= 0) { printf("ERR:DOMAIN\n"); return 0; }
+                        big_zero(&res.num); big_one(&res.den); res.inexact = 1;
+                    } else {
+                        Big B, Eb, lnB, prod, Y;
+                        fp_from_rat(&a.num, &a.den, &B);
+                        fp_from_rat(&b.num, &b.den, &Eb);
+                        fp_ln(&B, &lnB); fp_mul(&Eb, &lnB, &prod); fp_exp(&prod, &Y);
+                        rat_from_fp(&Y, &res);
+                    }
+                }
             } else { sp += 2; continue; }
             if (!ok) { printf("ERR:DIVZERO\n"); return 0; }
             stack[sp] = res; sp++;
@@ -478,7 +724,14 @@ int main(int argc, char **argv) {
     if (sp < 1) { fprintf(stderr, "vm_gates: empty stack\n"); return 4; }
 
     char out[LIMBS * 10];
-    rat_to_str(&stack[sp - 1], out);
+    Rat top = stack[sp - 1];
+    if (top.inexact) {
+        Big rn, rd; round_sig_rat(&top.num, &top.den, OUT_SIG, &rn, &rd);
+        Rat r2; big_copy(&rn, &r2.num); big_copy(&rd, &r2.den); r2.inexact = 1; rat_norm(&r2);
+        rat_to_str(&r2, out);
+    } else {
+        rat_to_str(&top, out);
+    }
     printf("%s\n", out);
     return 0;
 }

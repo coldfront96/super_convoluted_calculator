@@ -90,6 +90,10 @@ while read -r op v; do
             fi
             sp=$((sp + 1)) ;;
         NEG)  g_neg "${S[sp - 1]}"; S[sp - 1]=$RES ;;
+        # This bounded 64-bit engine can't do constants or transcendentals; it
+        # keeps the stack depth correct and lets the quorum outvote it.
+        CONST) S[sp]=0; sp=$((sp + 1)) ;;
+        FUNC)  S[sp - 1]=0 ;;
         *)
             b=${S[sp - 1]}; a=${S[sp - 2]}; sp=$((sp - 2))
             res=0

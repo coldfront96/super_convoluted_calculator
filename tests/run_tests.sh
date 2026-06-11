@@ -42,6 +42,11 @@ while IFS=$'\t' read -r e v; do
     check "$e" "$v"
 done < <(python3 "$REF" --gen-big 120)
 
+echo ">> 80 function-layer cases (50-sig-digit sqrt/trig/log/exp/pow)..."
+while IFS=$'\t' read -r e v; do
+    check "$e" "$v"
+done < <(python3 "$REF" --gen-fn 80)
+
 echo ">> Byzantine quorum: a single traitor must be outvoted..."
 traitor_err="$(mktemp)"
 traitor_out="$(CALC_TRAITOR=99999999 "$CALC" "1 + 2" 2>"$traitor_err")"
