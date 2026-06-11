@@ -42,6 +42,15 @@ g_mul() {
     RES=$r
 }
 
+# Integer power via repeated multiply (bounded so a huge exponent can't hang
+# this bounded engine; it simply dissents and is outvoted by the quorum).
+g_pow() {
+    local base=$1 e=$2 r=1
+    if (( e < 0 || e > 4096 )); then RES=0; return; fi
+    while (( e > 0 )); do g_mul "$r" "$base"; r=$RES; e=$((e - 1)); done
+    RES=$r
+}
+
 QUO=0
 REM=0
 # Signed division, truncating toward zero, via binary long division.
@@ -69,18 +78,29 @@ sp=0
 while read -r op v; do
     [[ -z "$op" ]] && continue
     case "$op" in
-        PUSH) S[sp]=$v; sp=$((sp + 1)) ;;
+        PUSH)
+            # Literals arrive as "p/q"; this 64-bit engine keeps only trunc(p/q).
+            if [[ "$v" == */* ]]; then
+                p=${v%/*}; q=${v#*/}
+                if (( q == 1 )); then S[sp]=$p
+                elif g_divmod "$p" "$q"; then S[sp]=$QUO
+                else S[sp]=0; fi
+            else
+                S[sp]=$v
+            fi
+            sp=$((sp + 1)) ;;
         NEG)  g_neg "${S[sp - 1]}"; S[sp - 1]=$RES ;;
         *)
             b=${S[sp - 1]}; a=${S[sp - 2]}; sp=$((sp - 2))
             res=0
             case "$op" in
-                ADD) g_add "$a" "$b"; res=$RES ;;
-                SUB) g_sub "$a" "$b"; res=$RES ;;
-                MUL) g_mul "$a" "$b"; res=$RES ;;
-                DIV) if g_divmod "$a" "$b"; then res=$QUO; else echo "ERR:DIVZERO"; exit 0; fi ;;
-                MOD) if g_divmod "$a" "$b"; then res=$REM; else echo "ERR:DIVZERO"; exit 0; fi ;;
-                *)   S[sp]=$a; sp=$((sp + 1)); S[sp]=$b; sp=$((sp + 1)); continue ;;
+                ADD)       g_add "$a" "$b"; res=$RES ;;
+                SUB)       g_sub "$a" "$b"; res=$RES ;;
+                MUL)       g_mul "$a" "$b"; res=$RES ;;
+                DIV|IDIV)  if g_divmod "$a" "$b"; then res=$QUO; else echo "ERR:DIVZERO"; exit 0; fi ;;
+                MOD)       if g_divmod "$a" "$b"; then res=$REM; else echo "ERR:DIVZERO"; exit 0; fi ;;
+                POW)       g_pow "$a" "$b"; res=$RES ;;
+                *)         S[sp]=$a; sp=$((sp + 1)); S[sp]=$b; sp=$((sp + 1)); continue ;;
             esac
             S[sp]=$res; sp=$((sp + 1))
             ;;

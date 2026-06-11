@@ -45,32 +45,45 @@ def main() -> None:
             node = {"op": "add" if op == "PLUS" else "sub", "l": node, "r": right}
         return node
 
-    # term := factor (('*'|'/'|'%') factor)*
+    # term := unary (('*'|'/'|'//'|'%') unary)*
     def parse_term():
-        node = parse_factor()
-        mapping = {"STAR": "mul", "SLASH": "div", "PERCENT": "mod"}
+        node = parse_unary()
+        mapping = {"STAR": "mul", "SLASH": "div", "IDIV": "idiv", "PERCENT": "mod"}
         while peek() in mapping:
             op = advance()[0]
-            right = parse_factor()
+            right = parse_unary()
             node = {"op": mapping[op], "l": node, "r": right}
         return node
 
-    # factor := ('-'|'+') factor | '(' expr ')' | INT
-    def parse_factor():
+    # unary := ('-'|'+') unary | power
+    def parse_unary():
         tp = peek()
         if tp == "MINUS":
             advance()
-            return {"op": "neg", "x": parse_factor()}
+            return {"op": "neg", "x": parse_unary()}
         if tp == "PLUS":
             advance()
-            return parse_factor()
+            return parse_unary()
+        return parse_power()
+
+    # power := atom ('^' unary)?   (right associative; exponent may be unary)
+    def parse_power():
+        base = parse_atom()
+        if peek() == "CARET":
+            advance()
+            return {"op": "pow", "l": base, "r": parse_unary()}
+        return base
+
+    # atom := NUM | '(' expr ')'
+    def parse_atom():
+        tp = peek()
         if tp == "LPAREN":
             advance()
             inner = parse_expr()
             expect("RPAREN")
             return inner
-        if tp == "INT":
-            return {"int": advance()[1]}
+        if tp == "NUM":
+            return {"num": advance()[1]}
         sys.exit(f"parse error: unexpected token {tp}")
 
     ast = parse_expr()

@@ -174,6 +174,9 @@ static void shl1(Big *x) {   /* x <<= 1 (plumbing: bit shifts) */
 /* unsigned binary long division: A,B >= 0 -> Q = A/B, R = A%B */
 static void udiv(const Big *A, const Big *B, Big *Q, Big *R) {
     big_zero(Q); big_zero(R);
+    /* Q's bits are set at arbitrary positions below; pre-zero every limb so
+     * any all-zero middle limb is initialized rather than left as garbage. */
+    for (int i = 0; i < A->n; i++) Q->d[i] = 0;
     int bits = A->n * 32;
     for (int p = bits - 1; p >= 0; p--) {
         shl1(R);
@@ -192,6 +195,7 @@ static void udiv(const Big *A, const Big *B, Big *Q, Big *R) {
 
 /* signed division truncating toward zero; remainder takes the dividend's sign */
 static int big_divmod(const Big *a, const Big *b, Big *q, Big *r) {
+    big_zero(q); big_zero(r);            /* always initialize outputs */
     if (b->sign == 0) return 0;
     Big A, B; big_copy(a, &A); A.sign = A.n ? 1 : 0;
     big_copy(b, &B); B.sign = 1;
@@ -265,8 +269,172 @@ static void to_dec(const Big *x, char *out) {
     out[pos] = '\0';
 }
 
+/* ---- small bignum helpers for the rational layer ---- */
+static void big_one(Big *r) { r->sign = 1; r->n = 1; r->d[0] = 1; }
+static void big_set_small(Big *r, uint32_t v) {
+    if (v == 0) { big_zero(r); return; }
+    r->sign = 1; r->n = 1; r->d[0] = v;
+}
+static int big_is_one(const Big *x) { return x->sign == 1 && x->n == 1 && x->d[0] == 1; }
+
+/* divmod by a small divisor; returns remainder, optionally stores quotient */
+static uint32_t divmod_small(const Big *x, uint32_t m, Big *q) {
+    Big out; big_zero(&out); out.n = x->n;
+    uint64_t rem = 0;
+    for (int i = x->n - 1; i >= 0; i--) {
+        uint64_t cur = (rem << 32) | x->d[i];
+        uint64_t qq, rr;
+        udivmod64(cur, (uint64_t)m, &qq, &rr);
+        out.d[i] = (uint32_t)qq;
+        rem = rr;
+    }
+    out.sign = 1; big_norm(&out);
+    if (q) big_copy(&out, q);
+    return (uint32_t)rem;
+}
+
+/* G = gcd(|A|, |B|) via Euclid */
+static void big_gcd(const Big *A, const Big *B, Big *G) {
+    Big a, b; big_copy(A, &a); a.sign = a.n ? 1 : 0;
+    big_copy(B, &b); b.sign = b.n ? 1 : 0;
+    while (b.sign != 0) {
+        Big q, r; big_divmod(&a, &b, &q, &r);
+        big_copy(&b, &a); big_copy(&r, &b);
+    }
+    big_copy(&a, G); G->sign = G->n ? 1 : 0;
+}
+
+/* out = base ** e, e >= 0 (exponentiation by squaring; sign handled by big_mul) */
+static void big_pow(const Big *base, const Big *e, Big *out) {
+    Big result; big_one(&result);
+    if (e->sign == 0) { big_copy(&result, out); return; }
+    Big b; big_copy(base, &b);
+    int top = e->n * 32 - 1;
+    while (top >= 0 && !((e->d[top >> 5] >> (top & 31)) & 1)) top--;
+    for (int i = 0; i <= top; i++) {
+        if ((e->d[i >> 5] >> (i & 31)) & 1) {
+            Big t; big_mul(&result, &b, &t); big_copy(&t, &result);
+        }
+        if (i < top) { Big t; big_mul(&b, &b, &t); big_copy(&t, &b); }
+    }
+    big_copy(&result, out);
+}
+
+/* ====================== LAYER 3.5: exact rationals ====================== */
+/* A rational is num/den, kept reduced with den > 0; zero is 0/1. */
+typedef struct { Big num, den; } Rat;
+
+static void rat_norm(Rat *r) {
+    if (r->num.sign == 0) { big_one(&r->den); return; }
+    if (r->den.sign < 0) { r->num.sign = -r->num.sign; r->den.sign = 1; }
+    Big g; big_gcd(&r->num, &r->den, &g);
+    if (!big_is_one(&g)) {
+        Big q, rr;
+        big_divmod(&r->num, &g, &q, &rr); big_copy(&q, &r->num);
+        big_divmod(&r->den, &g, &q, &rr); big_copy(&q, &r->den);
+    }
+}
+static void rat_set_int(Rat *r, const Big *v) { big_copy(v, &r->num); big_one(&r->den); }
+
+static void rat_add(const Rat *a, const Rat *b, Rat *o) {
+    Big t1, t2, n, d;
+    big_mul(&a->num, &b->den, &t1);
+    big_mul(&b->num, &a->den, &t2);
+    big_add(&t1, &t2, &n);
+    big_mul(&a->den, &b->den, &d);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o);
+}
+static void rat_sub(const Rat *a, const Rat *b, Rat *o) {
+    Big t1, t2, n, d;
+    big_mul(&a->num, &b->den, &t1);
+    big_mul(&b->num, &a->den, &t2);
+    big_sub(&t1, &t2, &n);
+    big_mul(&a->den, &b->den, &d);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o);
+}
+static void rat_mul(const Rat *a, const Rat *b, Rat *o) {
+    Big n, d; big_mul(&a->num, &b->num, &n); big_mul(&a->den, &b->den, &d);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o);
+}
+static int rat_div(const Rat *a, const Rat *b, Rat *o) {
+    if (b->num.sign == 0) return 0;
+    Big n, d; big_mul(&a->num, &b->den, &n); big_mul(&a->den, &b->num, &d);
+    big_copy(&n, &o->num); big_copy(&d, &o->den); rat_norm(o); return 1;
+}
+static int rat_idiv(const Rat *a, const Rat *b, Rat *o) {
+    Big N, D; big_mul(&a->num, &b->den, &N); big_mul(&a->den, &b->num, &D);
+    if (D.sign == 0) return 0;
+    Big q, r; big_divmod(&N, &D, &q, &r);
+    rat_set_int(o, &q); return 1;
+}
+static int rat_mod(const Rat *a, const Rat *b, Rat *o) {
+    Rat t; if (!rat_idiv(a, b, &t)) return 0;
+    Rat bt; rat_mul(b, &t, &bt); rat_sub(a, &bt, o); return 1;
+}
+/* returns 1 ok, 0 div-by-zero, -1 non-integer exponent (deferred to Layer B) */
+static int rat_pow(const Rat *a, const Rat *b, Rat *o) {
+    if (!big_is_one(&b->den)) return -1;
+    if (b->num.sign == 0) { big_one(&o->num); big_one(&o->den); return 1; }
+    Big m; big_copy(&b->num, &m); m.sign = 1;
+    Big pn, pd; big_pow(&a->num, &m, &pn); big_pow(&a->den, &m, &pd);
+    if (b->num.sign > 0) { big_copy(&pn, &o->num); big_copy(&pd, &o->den); }
+    else { if (a->num.sign == 0) return 0; big_copy(&pd, &o->num); big_copy(&pn, &o->den); }
+    rat_norm(o); return 1;
+}
+
+/* canonical string: integer | terminating decimal | reduced fraction p/q */
+static void rat_to_str(const Rat *r, char *out) {
+    if (r->num.sign == 0) { strcpy(out, "0"); return; }
+    if (big_is_one(&r->den)) { to_dec(&r->num, out); return; }
+
+    Big q; big_copy(&r->den, &q); q.sign = 1;
+    int a = 0, b = 0;
+    while (divmod_small(&q, 2, NULL) == 0) { Big t; divmod_small(&q, 2, &t); big_copy(&t, &q); a++; }
+    while (divmod_small(&q, 5, NULL) == 0) { Big t; divmod_small(&q, 5, &t); big_copy(&t, &q); b++; }
+
+    if (big_is_one(&q)) {
+        int k = a > b ? a : b;
+        Big ten, kk, tenk; big_set_small(&ten, 10); big_set_small(&kk, (uint32_t)k);
+        big_pow(&ten, &kk, &tenk);
+        Big scale, rr; big_divmod(&tenk, &r->den, &scale, &rr);
+        Big N; big_mul(&r->num, &scale, &N);
+        Big absN; big_copy(&N, &absN); absN.sign = absN.n ? 1 : 0;
+        char digits[LIMBS * 10]; to_dec(&absN, digits);
+        int L = (int)strlen(digits);
+        char intp[LIMBS * 10], frac[LIMBS * 10];
+        if (L <= k) {
+            strcpy(intp, "0");
+            int p = 0; for (int i = 0; i < k - L; i++) frac[p++] = '0';
+            strcpy(frac + p, digits);
+        } else {
+            int ilen = L - k; memcpy(intp, digits, ilen); intp[ilen] = '\0';
+            strcpy(frac, digits + ilen);
+        }
+        int fl = (int)strlen(frac);
+        while (fl > 0 && frac[fl - 1] == '0') frac[--fl] = '\0';
+        int pos = 0;
+        if (N.sign < 0) out[pos++] = '-';
+        strcpy(out + pos, intp); pos += (int)strlen(intp);
+        if (fl > 0) { out[pos++] = '.'; strcpy(out + pos, frac); }
+        else out[pos] = '\0';
+    } else {
+        char nb[LIMBS * 10], db[LIMBS * 10];
+        to_dec(&r->num, nb); to_dec(&r->den, db);
+        sprintf(out, "%s/%s", nb, db);
+    }
+}
+
+static void rat_parse(const char *operand, Rat *r) {
+    char buf[LIMBS * 10];
+    strncpy(buf, operand, sizeof buf - 1); buf[sizeof buf - 1] = '\0';
+    char *slash = strchr(buf, '/');
+    if (slash) { *slash = '\0'; from_dec(buf, &r->num); from_dec(slash + 1, &r->den); }
+    else { from_dec(buf, &r->num); big_one(&r->den); }
+    rat_norm(r);
+}
+
 /* ====================== LAYER 4: the stack VM =========================== */
-static Big stack[512];
+static Rat stack[512];
 
 int main(int argc, char **argv) {
     FILE *f = stdin;
@@ -284,29 +452,33 @@ int main(int argc, char **argv) {
         if (nf < 1) continue;
 
         if (!strcmp(op, "PUSH")) {
-            from_dec(operand, &stack[sp]); sp++;
+            rat_parse(operand, &stack[sp]); sp++;
         } else if (!strcmp(op, "NEG")) {
-            stack[sp - 1].sign = -stack[sp - 1].sign;
+            stack[sp - 1].num.sign = -stack[sp - 1].num.sign;
         } else {
-            Big b; big_copy(&stack[--sp], &b);
-            Big a; big_copy(&stack[--sp], &a);
-            Big res;
-            if (!strcmp(op, "ADD")) big_add(&a, &b, &res);
-            else if (!strcmp(op, "SUB")) big_sub(&a, &b, &res);
-            else if (!strcmp(op, "MUL")) big_mul(&a, &b, &res);
-            else if (!strcmp(op, "DIV") || !strcmp(op, "MOD")) {
-                Big q, r;
-                if (!big_divmod(&a, &b, &q, &r)) { printf("ERR:DIVZERO\n"); return 0; }
-                big_copy(op[0] == 'D' ? &q : &r, &res);
-            } else { continue; }
-            big_copy(&res, &stack[sp]); sp++;
+            Rat b = stack[--sp];
+            Rat a = stack[--sp];
+            Rat res; int ok = 1;
+            if (!strcmp(op, "ADD")) rat_add(&a, &b, &res);
+            else if (!strcmp(op, "SUB")) rat_sub(&a, &b, &res);
+            else if (!strcmp(op, "MUL")) rat_mul(&a, &b, &res);
+            else if (!strcmp(op, "DIV")) ok = rat_div(&a, &b, &res);
+            else if (!strcmp(op, "IDIV")) ok = rat_idiv(&a, &b, &res);
+            else if (!strcmp(op, "MOD")) ok = rat_mod(&a, &b, &res);
+            else if (!strcmp(op, "POW")) {
+                int pr = rat_pow(&a, &b, &res);
+                if (pr == 0) { printf("ERR:DIVZERO\n"); return 0; }
+                if (pr < 0) { printf("ERR:NONINT\n"); return 0; }
+            } else { sp += 2; continue; }
+            if (!ok) { printf("ERR:DIVZERO\n"); return 0; }
+            stack[sp] = res; sp++;
         }
     }
     if (argc > 1) fclose(f);
     if (sp < 1) { fprintf(stderr, "vm_gates: empty stack\n"); return 4; }
 
     char out[LIMBS * 10];
-    to_dec(&stack[sp - 1], out);
+    rat_to_str(&stack[sp - 1], out);
     printf("%s\n", out);
     return 0;
 }

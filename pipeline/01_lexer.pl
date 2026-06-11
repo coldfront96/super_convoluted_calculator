@@ -15,7 +15,7 @@ $src = '' unless defined $src;
 
 my %SYM = (
     '+' => 'PLUS',  '-' => 'MINUS', '*' => 'STAR',
-    '/' => 'SLASH', '%' => 'PERCENT',
+    '/' => 'SLASH', '%' => 'PERCENT', '^' => 'CARET',
     '(' => 'LPAREN', ')' => 'RPAREN',
 );
 
@@ -23,11 +23,20 @@ print "idx,type,value\n";
 my $idx = 0;
 
 # Anchored scan: each iteration consumes leading whitespace then exactly one
-# token. \G keeps us glued to where the previous match ended.
-while ($src =~ /\G\s*(\d+|[-+*\/%()])/gc) {
+# token. \G keeps us glued to where the previous match ended. Numbers may carry
+# a decimal point and/or a scientific exponent; '//' is integer division.
+while ($src =~ m{
+        \G\s*
+        ( //                                               # integer division
+        | [0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?              # 12, 3.14, 1e9, 2.5e-3
+        | \.[0-9]+(?:[eE][+-]?[0-9]+)?                     # .5, .25e3
+        | [-+*/%()^] )
+    }gcx) {
     my $tok = $1;
-    if ($tok =~ /^\d+$/) {
-        print "$idx,INT,$tok\n";
+    if ($tok =~ /^[0-9.]/) {
+        print "$idx,NUM,$tok\n";
+    } elsif ($tok eq '//') {
+        print "$idx,IDIV,\n";
     } else {
         print "$idx,$SYM{$tok},\n";
     }

@@ -29,11 +29,14 @@ never does.)
 Same input → same correct output, every time. No randomness in the answer.
 
 ## Rule 6 — It stays a calculator
-Real expression in, real answer out. Supports `+ - * / %`, parentheses, unary
-minus, and integer precedence. Arbitrary-precision signed integer semantics
-(division truncates toward zero; remainder takes the dividend's sign) across the
-four bignum engines. The Bash engine is a bounded 64-bit gate engine that the
-Byzantine quorum outvotes whenever a result overflows 64 bits.
+Real expression in, real answer out. Supports `+ - * / // % ^`, parentheses,
+unary minus, decimal and scientific literals, and correct precedence. Numbers are
+**exact arbitrary-precision rationals** (p/q of bignums): `/` is exact division,
+`//` truncates toward zero, `%` takes the dividend's sign, `^` is integer
+exponentiation. Output is canonical: integer, terminating decimal, or reduced
+fraction. The four rational engines (C/Rust/Go/Java) are exact; the Bash engine
+is a bounded 64-bit integer gate engine that the Byzantine quorum outvotes
+whenever a result overflows 64 bits or isn't a whole number.
 
 ## Rule 7 — Maximize convolution within Rules 1–6
 Subject to everything above, make it as unnecessarily complicated as humanly

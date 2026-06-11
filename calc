@@ -141,10 +141,14 @@ else
     fi
 fi
 
-# ---- shared: division-by-zero contract ----
+# ---- shared: error contracts ----
 if [[ "$verdict" == "ERR:DIVZERO" ]]; then
     echo "Error: division by zero is undefined." >&2
     exit 3
+fi
+if [[ "$verdict" == "ERR:NONINT" ]]; then
+    echo "Error: non-integer exponents require the (not-yet-built) function layer." >&2
+    exit 5
 fi
 
 # ---- STAGE 6: render & cross-verify ----
@@ -161,5 +165,5 @@ banner "CONSENSUS REACHED: $verdict"
 if [[ $REPORT -eq 1 ]]; then
     echo "$render" | jq .
 else
-    echo "$render" | jq -r .decimal
+    echo "$render" | jq -r .value
 fi

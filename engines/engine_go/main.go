@@ -404,6 +404,250 @@ func toDec(x Big) string {
 	return sb.String()
 }
 
+// ---- small bignum helpers for the rational layer ----
+func bigOne() Big          { return Big{1, []uint32{1}} }
+func bigFromSmall(v uint32) Big {
+	if v == 0 {
+		return zero()
+	}
+	return Big{1, []uint32{v}}
+}
+func bigIsOne(x Big) bool { return x.sign == 1 && len(x.d) == 1 && x.d[0] == 1 }
+
+func divmodSmall(x Big, m uint32) (Big, uint32) {
+	d := make([]uint32, len(x.d))
+	var rem uint64
+	for i := len(x.d) - 1; i >= 0; i-- {
+		cur := (rem << 32) | uint64(x.d[i])
+		q, r := gudivmod64(cur, uint64(m))
+		d[i] = uint32(q)
+		rem = r
+	}
+	out := Big{1, d}
+	out.norm()
+	return out, uint32(rem)
+}
+
+func bigGcd(a, b Big) Big {
+	a = a.clone()
+	if len(a.d) == 0 {
+		a.sign = 0
+	} else {
+		a.sign = 1
+	}
+	b = b.clone()
+	if len(b.d) == 0 {
+		b.sign = 0
+	} else {
+		b.sign = 1
+	}
+	for b.sign != 0 {
+		_, r := udiv(a, b)
+		a = b
+		b = r
+		if len(b.d) == 0 {
+			b.sign = 0
+		} else {
+			b.sign = 1
+		}
+	}
+	if len(a.d) == 0 {
+		a.sign = 0
+	} else {
+		a.sign = 1
+	}
+	return a
+}
+
+func bigPow(base, e Big) Big {
+	result := bigOne()
+	if e.sign == 0 {
+		return result
+	}
+	b := base.clone()
+	top := len(e.d)*32 - 1
+	for top >= 0 && (e.d[top>>5]>>uint(top&31))&1 == 0 {
+		top--
+	}
+	for i := 0; i <= top; i++ {
+		if (e.d[i>>5]>>uint(i&31))&1 == 1 {
+			result = bigMul(result, b)
+		}
+		if i < top {
+			b = bigMul(b, b)
+		}
+	}
+	return result
+}
+
+// ---- exact rationals ----
+type Rat struct{ num, den Big }
+
+func ratNorm(r *Rat) {
+	if r.num.sign == 0 {
+		r.den = bigOne()
+		return
+	}
+	if r.den.sign < 0 {
+		r.num.sign = -r.num.sign
+		r.den.sign = 1
+	}
+	g := bigGcd(r.num, r.den)
+	if !bigIsOne(g) {
+		q, _, _ := bigDivmod(r.num, g)
+		r.num = q
+		q, _, _ = bigDivmod(r.den, g)
+		r.den = q
+	}
+}
+func ratParse(s string) Rat {
+	var r Rat
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		r = Rat{fromDec(s[:i]), fromDec(s[i+1:])}
+	} else {
+		r = Rat{fromDec(s), bigOne()}
+	}
+	ratNorm(&r)
+	return r
+}
+func ratAdd(a, b Rat) Rat {
+	n := bigAdd(bigMul(a.num, b.den), bigMul(b.num, a.den))
+	d := bigMul(a.den, b.den)
+	r := Rat{n, d}
+	ratNorm(&r)
+	return r
+}
+func ratSub(a, b Rat) Rat {
+	n := bigSub(bigMul(a.num, b.den), bigMul(b.num, a.den))
+	d := bigMul(a.den, b.den)
+	r := Rat{n, d}
+	ratNorm(&r)
+	return r
+}
+func ratMul(a, b Rat) Rat {
+	r := Rat{bigMul(a.num, b.num), bigMul(a.den, b.den)}
+	ratNorm(&r)
+	return r
+}
+func ratDiv(a, b Rat) (Rat, bool) {
+	if b.num.sign == 0 {
+		return Rat{}, false
+	}
+	r := Rat{bigMul(a.num, b.den), bigMul(a.den, b.num)}
+	ratNorm(&r)
+	return r, true
+}
+func ratIdiv(a, b Rat) (Rat, bool) {
+	nn := bigMul(a.num, b.den)
+	dd := bigMul(a.den, b.num)
+	if dd.sign == 0 {
+		return Rat{}, false
+	}
+	q, _, _ := bigDivmod(nn, dd)
+	return Rat{q, bigOne()}, true
+}
+func ratMod(a, b Rat) (Rat, bool) {
+	t, ok := ratIdiv(a, b)
+	if !ok {
+		return Rat{}, false
+	}
+	bt := ratMul(b, t)
+	return ratSub(a, bt), true
+}
+
+// ratPow return code: 1 ok, 0 div-by-zero, -1 non-integer exponent (Layer B)
+func ratPow(a, b Rat) (Rat, int) {
+	if !bigIsOne(b.den) {
+		return Rat{}, -1
+	}
+	if b.num.sign == 0 {
+		return Rat{bigOne(), bigOne()}, 1
+	}
+	m := b.num.clone()
+	m.sign = 1
+	pn := bigPow(a.num, m)
+	pd := bigPow(a.den, m)
+	var r Rat
+	if b.num.sign > 0 {
+		r = Rat{pn, pd}
+	} else {
+		if a.num.sign == 0 {
+			return Rat{}, 0
+		}
+		r = Rat{pd, pn}
+	}
+	ratNorm(&r)
+	return r, 1
+}
+func ratToString(r Rat) string {
+	if r.num.sign == 0 {
+		return "0"
+	}
+	if bigIsOne(r.den) {
+		return toDec(r.num)
+	}
+	q := r.den.clone()
+	q.sign = 1
+	var a, b uint32
+	for {
+		qq, rem := divmodSmall(q, 2)
+		if rem == 0 {
+			q = qq
+			a++
+		} else {
+			break
+		}
+	}
+	for {
+		qq, rem := divmodSmall(q, 5)
+		if rem == 0 {
+			q = qq
+			b++
+		} else {
+			break
+		}
+	}
+	if bigIsOne(q) {
+		k := a
+		if b > k {
+			k = b
+		}
+		tenk := bigPow(bigFromSmall(10), bigFromSmall(k))
+		scale, _, _ := bigDivmod(tenk, r.den)
+		n := bigMul(r.num, scale)
+		neg := n.sign < 0
+		absn := n.clone()
+		if len(absn.d) == 0 {
+			absn.sign = 0
+		} else {
+			absn.sign = 1
+		}
+		digits := toDec(absn)
+		ki := int(k)
+		var intp, frac string
+		if len(digits) <= ki {
+			intp = "0"
+			frac = strings.Repeat("0", ki-len(digits)) + digits
+		} else {
+			il := len(digits) - ki
+			intp = digits[:il]
+			frac = digits[il:]
+		}
+		frac = strings.TrimRight(frac, "0")
+		var sb strings.Builder
+		if neg {
+			sb.WriteByte('-')
+		}
+		sb.WriteString(intp)
+		if frac != "" {
+			sb.WriteByte('.')
+			sb.WriteString(frac)
+		}
+		return sb.String()
+	}
+	return toDec(r.num) + "/" + toDec(r.den)
+}
+
 func main() {
 	var scanner *bufio.Scanner
 	if len(os.Args) > 1 {
@@ -420,7 +664,7 @@ func main() {
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 16*1024*1024)
 
-	stack := make([]Big, 0, 64)
+	stack := make([]Rat, 0, 64)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -430,34 +674,55 @@ func main() {
 		op := parts[0]
 		switch op {
 		case "PUSH":
-			stack = append(stack, fromDec(parts[1]))
+			stack = append(stack, ratParse(parts[1]))
 		case "NEG":
 			n := len(stack)
-			stack[n-1].sign = -stack[n-1].sign
+			stack[n-1].num.sign = -stack[n-1].num.sign
 		default:
 			n := len(stack)
 			b := stack[n-1]
 			a := stack[n-2]
 			stack = stack[:n-2]
-			var res Big
+			var res Rat
 			switch op {
 			case "ADD":
-				res = bigAdd(a, b)
+				res = ratAdd(a, b)
 			case "SUB":
-				res = bigSub(a, b)
+				res = ratSub(a, b)
 			case "MUL":
-				res = bigMul(a, b)
-			case "DIV", "MOD":
-				q, r, ok := bigDivmod(a, b)
+				res = ratMul(a, b)
+			case "DIV":
+				r, ok := ratDiv(a, b)
 				if !ok {
 					os.Stdout.WriteString("ERR:DIVZERO\n")
 					return
 				}
-				if op == "DIV" {
-					res = q
-				} else {
-					res = r
+				res = r
+			case "IDIV":
+				r, ok := ratIdiv(a, b)
+				if !ok {
+					os.Stdout.WriteString("ERR:DIVZERO\n")
+					return
 				}
+				res = r
+			case "MOD":
+				r, ok := ratMod(a, b)
+				if !ok {
+					os.Stdout.WriteString("ERR:DIVZERO\n")
+					return
+				}
+				res = r
+			case "POW":
+				r, code := ratPow(a, b)
+				if code == 0 {
+					os.Stdout.WriteString("ERR:DIVZERO\n")
+					return
+				}
+				if code < 0 {
+					os.Stdout.WriteString("ERR:NONINT\n")
+					return
+				}
+				res = r
 			default:
 				stack = append(stack, a, b)
 				continue
@@ -469,5 +734,5 @@ func main() {
 		os.Stderr.WriteString("engine_go: empty stack\n")
 		os.Exit(4)
 	}
-	os.Stdout.WriteString(toDec(stack[len(stack)-1]) + "\n")
+	os.Stdout.WriteString(ratToString(stack[len(stack)-1]) + "\n")
 }

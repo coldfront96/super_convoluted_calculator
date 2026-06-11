@@ -259,6 +259,159 @@ fn to_dec(x: &Big) -> String {
     out
 }
 
+// ---- small bignum helpers for the rational layer ----
+fn big_one() -> Big { Big { sign: 1, d: vec![1] } }
+fn big_from_small(v: u32) -> Big { if v == 0 { Big::zero() } else { Big { sign: 1, d: vec![v] } } }
+fn big_is_one(x: &Big) -> bool { x.sign == 1 && x.d.len() == 1 && x.d[0] == 1 }
+
+fn divmod_small(x: &Big, m: u32) -> (Big, u32) {
+    let mut d = vec![0u32; x.d.len()];
+    let mut rem: u64 = 0;
+    for i in (0..x.d.len()).rev() {
+        let cur = (rem << 32) | (x.d[i] as u64);
+        let (q, r) = gudivmod64(cur, m as u64);
+        d[i] = q as u32;
+        rem = r;
+    }
+    let mut out = Big { sign: 1, d };
+    out.norm();
+    (out, rem as u32)
+}
+
+fn big_gcd(a: &Big, b: &Big) -> Big {
+    let mut a = a.clone(); a.sign = if a.d.is_empty() { 0 } else { 1 };
+    let mut b = b.clone(); b.sign = if b.d.is_empty() { 0 } else { 1 };
+    while b.sign != 0 {
+        let (_q, r) = udiv(&a, &b);
+        a = b;
+        b = r;
+        b.sign = if b.d.is_empty() { 0 } else { 1 };
+    }
+    a.sign = if a.d.is_empty() { 0 } else { 1 };
+    a
+}
+
+fn big_pow(base: &Big, e: &Big) -> Big {
+    let mut result = big_one();
+    if e.sign == 0 { return result; }
+    let mut b = base.clone();
+    let bits = e.d.len() * 32;
+    let mut top: i64 = bits as i64 - 1;
+    while top >= 0 && ((e.d[(top as usize) >> 5] >> ((top as usize) & 31)) & 1) == 0 { top -= 1; }
+    let top = top as usize;
+    for i in 0..=top {
+        if (e.d[i >> 5] >> (i & 31)) & 1 == 1 { result = big_mul(&result, &b); }
+        if i < top { b = big_mul(&b, &b); }
+    }
+    result
+}
+
+// ---- exact rationals ----
+#[derive(Clone)]
+struct Rat { num: Big, den: Big }
+
+fn rat_norm(r: &mut Rat) {
+    if r.num.sign == 0 { r.den = big_one(); return; }
+    if r.den.sign < 0 { r.num.sign = -r.num.sign; r.den.sign = 1; }
+    let g = big_gcd(&r.num, &r.den);
+    if !big_is_one(&g) {
+        r.num = big_divmod(&r.num, &g).unwrap().0;
+        r.den = big_divmod(&r.den, &g).unwrap().0;
+    }
+}
+fn rat_parse(s: &str) -> Rat {
+    let mut r = if let Some(i) = s.find('/') {
+        Rat { num: from_dec(&s[..i]), den: from_dec(&s[i + 1..]) }
+    } else {
+        Rat { num: from_dec(s), den: big_one() }
+    };
+    rat_norm(&mut r);
+    r
+}
+fn rat_add(a: &Rat, b: &Rat) -> Rat {
+    let n = big_add(&big_mul(&a.num, &b.den), &big_mul(&b.num, &a.den));
+    let d = big_mul(&a.den, &b.den);
+    let mut r = Rat { num: n, den: d }; rat_norm(&mut r); r
+}
+fn rat_sub(a: &Rat, b: &Rat) -> Rat {
+    let n = big_sub(&big_mul(&a.num, &b.den), &big_mul(&b.num, &a.den));
+    let d = big_mul(&a.den, &b.den);
+    let mut r = Rat { num: n, den: d }; rat_norm(&mut r); r
+}
+fn rat_mul(a: &Rat, b: &Rat) -> Rat {
+    let mut r = Rat { num: big_mul(&a.num, &b.num), den: big_mul(&a.den, &b.den) };
+    rat_norm(&mut r); r
+}
+fn rat_div(a: &Rat, b: &Rat) -> Option<Rat> {
+    if b.num.sign == 0 { return None; }
+    let mut r = Rat { num: big_mul(&a.num, &b.den), den: big_mul(&a.den, &b.num) };
+    rat_norm(&mut r); Some(r)
+}
+fn rat_idiv(a: &Rat, b: &Rat) -> Option<Rat> {
+    let nn = big_mul(&a.num, &b.den);
+    let dd = big_mul(&a.den, &b.num);
+    if dd.sign == 0 { return None; }
+    let (q, _) = big_divmod(&nn, &dd)?;
+    Some(Rat { num: q, den: big_one() })
+}
+fn rat_mod(a: &Rat, b: &Rat) -> Option<Rat> {
+    let t = rat_idiv(a, b)?;
+    let bt = rat_mul(b, &t);
+    Some(rat_sub(a, &bt))
+}
+// Ok(rat); Err(0)=div-by-zero; Err(-1)=non-integer exponent (Layer B)
+fn rat_pow(a: &Rat, b: &Rat) -> Result<Rat, i32> {
+    if !big_is_one(&b.den) { return Err(-1); }
+    if b.num.sign == 0 { return Ok(Rat { num: big_one(), den: big_one() }); }
+    let mut m = b.num.clone(); m.sign = 1;
+    let pn = big_pow(&a.num, &m);
+    let pd = big_pow(&a.den, &m);
+    let mut r = if b.num.sign > 0 {
+        Rat { num: pn, den: pd }
+    } else {
+        if a.num.sign == 0 { return Err(0); }
+        Rat { num: pd, den: pn }
+    };
+    rat_norm(&mut r);
+    Ok(r)
+}
+fn rat_to_string(r: &Rat) -> String {
+    if r.num.sign == 0 { return "0".to_string(); }
+    if big_is_one(&r.den) { return to_dec(&r.num); }
+    let mut q = r.den.clone(); q.sign = 1;
+    let mut a = 0u32;
+    let mut b = 0u32;
+    loop { let (qq, rem) = divmod_small(&q, 2); if rem == 0 { q = qq; a += 1; } else { break; } }
+    loop { let (qq, rem) = divmod_small(&q, 5); if rem == 0 { q = qq; b += 1; } else { break; } }
+    if big_is_one(&q) {
+        let k = a.max(b);
+        let tenk = big_pow(&big_from_small(10), &big_from_small(k));
+        let (scale, _) = big_divmod(&tenk, &r.den).unwrap();
+        let n = big_mul(&r.num, &scale);
+        let neg = n.sign < 0;
+        let mut absn = n.clone(); absn.sign = if absn.d.is_empty() { 0 } else { 1 };
+        let digits = to_dec(&absn);
+        let k = k as usize;
+        let (intp, frac) = if digits.len() <= k {
+            let mut f = String::new();
+            for _ in 0..(k - digits.len()) { f.push('0'); }
+            f.push_str(&digits);
+            ("0".to_string(), f)
+        } else {
+            let il = digits.len() - k;
+            (digits[..il].to_string(), digits[il..].to_string())
+        };
+        let frac = frac.trim_end_matches('0');
+        let mut out = String::new();
+        if neg { out.push('-'); }
+        out.push_str(&intp);
+        if !frac.is_empty() { out.push('.'); out.push_str(frac); }
+        out
+    } else {
+        format!("{}/{}", to_dec(&r.num), to_dec(&r.den))
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut src = String::new();
@@ -268,25 +421,29 @@ fn main() {
         std::io::stdin().read_to_string(&mut src).unwrap();
     }
 
-    let mut stack: Vec<Big> = Vec::new();
+    let mut stack: Vec<Rat> = Vec::new();
     for line in src.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
         let mut parts = line.split_whitespace();
         let op = parts.next().unwrap();
         match op {
-            "PUSH" => stack.push(from_dec(parts.next().unwrap())),
-            "NEG" => { let n = stack.len(); stack[n - 1].sign = -stack[n - 1].sign; }
+            "PUSH" => stack.push(rat_parse(parts.next().unwrap())),
+            "NEG" => { let n = stack.len(); stack[n - 1].num.sign = -stack[n - 1].num.sign; }
             _ => {
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();
                 let res = match op {
-                    "ADD" => big_add(&a, &b),
-                    "SUB" => big_sub(&a, &b),
-                    "MUL" => big_mul(&a, &b),
-                    "DIV" | "MOD" => match big_divmod(&a, &b) {
-                        Some((q, r)) => if op == "DIV" { q } else { r },
-                        None => { println!("ERR:DIVZERO"); return; }
+                    "ADD" => rat_add(&a, &b),
+                    "SUB" => rat_sub(&a, &b),
+                    "MUL" => rat_mul(&a, &b),
+                    "DIV" => match rat_div(&a, &b) { Some(x) => x, None => { println!("ERR:DIVZERO"); return; } },
+                    "IDIV" => match rat_idiv(&a, &b) { Some(x) => x, None => { println!("ERR:DIVZERO"); return; } },
+                    "MOD" => match rat_mod(&a, &b) { Some(x) => x, None => { println!("ERR:DIVZERO"); return; } },
+                    "POW" => match rat_pow(&a, &b) {
+                        Ok(x) => x,
+                        Err(0) => { println!("ERR:DIVZERO"); return; }
+                        Err(_) => { println!("ERR:NONINT"); return; }
                     },
                     _ => { stack.push(a); stack.push(b); continue; }
                 };
@@ -294,5 +451,5 @@ fn main() {
             }
         }
     }
-    println!("{}", to_dec(stack.last().expect("engine_rust: empty stack")));
+    println!("{}", rat_to_string(stack.last().expect("engine_rust: empty stack")));
 }

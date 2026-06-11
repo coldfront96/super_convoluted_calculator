@@ -2,188 +2,246 @@
 # ============================================================================
 # THE ORACLE OF TRUTH  (independent reference implementation)
 # ----------------------------------------------------------------------------
-# A standalone, deliberately simple evaluator used only by the test suite to
-# decide what the correct answer IS. It mirrors the calculator's semantics:
-# arbitrary-precision signed integers, division truncating toward zero, and a
-# remainder that takes the dividend's sign. If `calc` ever disagrees with this
-# oracle, HARD_RULES #1 is broken.
+# Decides what the correct answer IS, using Python's exact Fraction. Mirrors the
+# calculator's semantics: exact rationals; `/` exact division; `//` integer
+# division truncating toward zero; `%` remainder with the dividend's sign; `^`
+# integer exponentiation; decimals and scientific notation as exact rationals.
+# Canonical output: integer | terminating decimal | reduced fraction p/q.
 #
 # Modes:
 #   reference.py "<expr>"     -> print the correct answer
-#   reference.py --cases      -> emit curated  "expr\tanswer" lines
-#   reference.py --gen N      -> emit N random "expr\tanswer" lines
-#   reference.py --gen-big N  -> emit N random BIG "expr\tanswer" lines
+#   reference.py --cases      -> curated  "expr\tanswer" lines
+#   reference.py --gen N      -> random rational "expr\tanswer" lines
+#   reference.py --gen-big N  -> random BIG integer "expr\tanswer" lines
 # ============================================================================
 import sys
+import re
 import random
+from fractions import Fraction
+
+TOKEN = re.compile(
+    r"\s*(//|[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?|[-+*/%()^])"
+)
 
 
-def _trunc_div(a, b):
-    q = abs(a) // abs(b)
+def lit_to_fraction(s):
+    m = s.lower()
+    exp = 0
+    if "e" in m:
+        base, e = m.split("e", 1)
+        exp = int(e)
+        m = base
+    if "." in m:
+        intp, frac = m.split(".", 1)
+    else:
+        intp, frac = m, ""
+    intp = intp or "0"
+    num = int(intp + frac) if (intp + frac) else 0
+    den = 10 ** len(frac)
+    if exp >= 0:
+        num *= 10 ** exp
+    else:
+        den *= 10 ** (-exp)
+    return Fraction(num, den)
+
+
+def trunc_div(a, b):
+    if b == 0:
+        raise ZeroDivisionError
+    q = abs(a.numerator * b.denominator) // abs(a.denominator * b.numerator)
     if (a < 0) != (b < 0):
         q = -q
-    return q
+    return Fraction(q)
 
 
-def ev_add(a, b): return a + b
-def ev_sub(a, b): return a - b
-def ev_mul(a, b): return a * b
-
-
-def ev_div(a, b):
-    if b == 0:
-        raise ZeroDivisionError
-    return _trunc_div(a, b)
-
-
-def ev_mod(a, b):
-    if b == 0:
-        raise ZeroDivisionError
-    return a - _trunc_div(a, b) * b
-
-
-# ---- a tiny independent recursive-descent evaluator ----
-class P:
+class Parser:
     def __init__(self, s):
-        self.s = s
-        self.i = 0
-
-    def ws(self):
-        while self.i < len(self.s) and self.s[self.i].isspace():
-            self.i += 1
+        self.toks = []
+        i = 0
+        while i < len(s):
+            if s[i].isspace():
+                i += 1
+                continue
+            m = TOKEN.match(s, i)
+            if not m:
+                raise ValueError(f"bad token at {i!r}")
+            self.toks.append(m.group(1))
+            i = m.end()
+        self.p = 0
 
     def peek(self):
-        self.ws()
-        return self.s[self.i] if self.i < len(self.s) else ''
+        return self.toks[self.p] if self.p < len(self.toks) else None
+
+    def nxt(self):
+        t = self.toks[self.p]
+        self.p += 1
+        return t
 
     def expr(self):
         v = self.term()
-        while self.peek() in ('+', '-'):
-            op = self.s[self.i]; self.i += 1
+        while self.peek() in ("+", "-"):
+            op = self.nxt()
             r = self.term()
-            v = ev_add(v, r) if op == '+' else ev_sub(v, r)
+            v = v + r if op == "+" else v - r
         return v
 
     def term(self):
-        v = self.factor()
-        while self.peek() in ('*', '/', '%'):
-            op = self.s[self.i]; self.i += 1
-            r = self.factor()
-            v = ev_mul(v, r) if op == '*' else (ev_div(v, r) if op == '/' else ev_mod(v, r))
+        v = self.unary()
+        while self.peek() in ("*", "/", "//", "%"):
+            op = self.nxt()
+            r = self.unary()
+            if op == "*":
+                v = v * r
+            elif op == "/":
+                if r == 0:
+                    raise ZeroDivisionError
+                v = v / r
+            elif op == "//":
+                v = trunc_div(v, r)
+            else:
+                v = v - r * trunc_div(v, r)
         return v
 
-    def factor(self):
-        c = self.peek()
-        if c == '-':
-            self.i += 1
-            return -self.factor()
-        if c == '+':
-            self.i += 1
-            return self.factor()
-        if c == '(':
-            self.i += 1
+    def unary(self):
+        t = self.peek()
+        if t == "-":
+            self.nxt()
+            return -self.unary()
+        if t == "+":
+            self.nxt()
+            return self.unary()
+        return self.power()
+
+    def power(self):
+        base = self.atom()
+        if self.peek() == "^":
+            self.nxt()
+            e = self.unary()
+            if e.denominator != 1:
+                raise ValueError("non-integer exponent")
+            n = e.numerator
+            if n == 0:
+                return Fraction(1)
+            if n < 0 and base == 0:
+                raise ZeroDivisionError
+            return base ** n
+        return base
+
+    def atom(self):
+        t = self.peek()
+        if t == "(":
+            self.nxt()
             v = self.expr()
-            self.peek()
-            self.i += 1  # skip ')'
+            if self.peek() != ")":
+                raise ValueError("missing )")
+            self.nxt()
             return v
-        # integer
-        self.ws()
-        start = self.i
-        while self.i < len(self.s) and self.s[self.i].isdigit():
-            self.i += 1
-        return int(self.s[start:self.i])
+        if t is not None and (t[0].isdigit() or t[0] == "."):
+            return lit_to_fraction(self.nxt())
+        raise ValueError(f"unexpected token {t}")
 
 
-def evaluate(expr):
-    return P(expr).expr()
+def evaluate(s):
+    return Parser(s).expr()
 
 
-# ---- random expression generator (avoids division by zero) ----
-def gen_expr(rng, depth=0):
-    if depth >= 3 or rng.random() < 0.45:
-        return str(rng.randint(0, 9999))
-    op = rng.choice(['+', '-', '*', '/', '%'])
-    left = gen_expr(rng, depth + 1)
-    right = gen_expr(rng, depth + 1)
-    if op in '/%':
-        right = str(rng.randint(1, 999))  # never zero
-    expr = f"({left} {op} {right})"
-    if rng.random() < 0.2:
-        expr = "-" + expr
-    return expr
+def canon(fr: Fraction) -> str:
+    p, q = fr.numerator, fr.denominator
+    if q == 1:
+        return str(p)
+    qq, a, b = q, 0, 0
+    while qq % 2 == 0:
+        qq //= 2
+        a += 1
+    while qq % 5 == 0:
+        qq //= 5
+        b += 1
+    if qq == 1:
+        k = max(a, b)
+        scale = 10 ** k // q
+        N = p * scale
+        s = str(abs(N))
+        if len(s) <= k:
+            intp, frac = "0", "0" * (k - len(s)) + s
+        else:
+            intp, frac = s[: len(s) - k], s[len(s) - k:]
+        frac = frac.rstrip("0")
+        return ("-" if N < 0 else "") + intp + ("." + frac if frac else "")
+    return f"{p}/{q}"
 
 
-def gen_big_expr(rng, depth=0):
-    if depth >= 3 or rng.random() < 0.45:
-        # numbers that comfortably exceed 64 bits
-        digits = rng.randint(15, 40)
-        n = rng.randint(10 ** (digits - 1), 10 ** digits)
+# ---- generators ----
+def gen_num(rng):
+    r = rng.random()
+    if r < 0.45:
+        return str(rng.randint(-50, 50))
+    if r < 0.8:
+        ip = rng.randint(0, 60)
+        fl = rng.randint(1, 3)
+        frac = "".join(rng.choice("0123456789") for _ in range(fl))
+        s = f"{ip}.{frac}"
+        return ("-" + s) if rng.random() < 0.3 else s
+    return str(rng.randint(1, 9)) + "e" + str(rng.randint(0, 4))
+
+
+def gen(rng, depth=0):
+    if depth >= 3 or rng.random() < 0.5:
+        return gen_num(rng)
+    op = rng.choice(["+", "-", "*", "/", "//", "%", "^"])
+    if op == "^":
+        return f"({gen(rng, depth + 1)})^{rng.randint(0, 6)}"
+    return f"({gen(rng, depth + 1)}){op}({gen(rng, depth + 1)})"
+
+
+def gen_big(rng, depth=0):
+    if depth >= 3 or rng.random() < 0.5:
+        d = rng.randint(12, 36)
+        n = rng.randint(10 ** (d - 1), 10 ** d)
         return ("-" if rng.random() < 0.3 else "") + str(n)
-    op = rng.choice(['+', '-', '*', '/', '%'])
-    left = gen_big_expr(rng, depth + 1)
-    right = gen_big_expr(rng, depth + 1)
-    if op in '/%':
-        d = rng.randint(10 ** 14, 10 ** 30)
-        right = ("-" if rng.random() < 0.3 else "") + str(d)
-    return f"({left} {op} {right})"
+    op = rng.choice(["+", "-", "*", "//", "%", "^"])
+    if op == "^":
+        return f"({gen_big(rng, depth + 1)})^{rng.randint(0, 4)}"
+    return f"({gen_big(rng, depth + 1)}){op}({gen_big(rng, depth + 1)})"
 
 
 CURATED = [
-    "1 + 2",
-    "2 + 2",
-    "10 - 3",
-    "6 * 7",
-    "100 / 7",
-    "100 % 7",
-    "-5 + 3",
-    "-(4 + 6)",
-    "2 * (3 + 4)",
-    "(1 + 2) * (3 + 4)",
-    "1000000 * 1000000",
-    "2 - -2",
-    "7 / 2",
-    "-7 / 2",
-    "7 % -3",
-    "-7 % 3",
-    "0 - 0",
-    "((((5))))",
-    "3 * 3 * 3 * 3",
-    "999999999 + 1",
-    "1 + 2 * 3 - 4 / 2",
-    "(10 - 2) % (1 + 2)",
-    # ---- arbitrary precision: results far beyond 64 bits ----
-    "1000000000000000000 * 1000000000000000000",
-    "2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2 * 2",
-    "123456789012345678901234567890 + 987654321098765432109876543210",
-    "99999999999999999999 * 99999999999999999999",
-    "(10000000000000000000000000000000000000000 / 7)",
-    "(10000000000000000000000000000000000000000 % 7)",
-    "-123456789012345678901234567890 * 2",
-    "1000000000000000000000000000000 - 1",
+    "1 + 2", "2 + 2", "10 - 3", "6 * 7", "-5 + 3", "-(4 + 6)",
+    "2 * (3 + 4)", "(1 + 2) * (3 + 4)", "1 + 2 * 3 - 4 // 2",
+    # exact division and fractions
+    "1 / 2", "1 / 3", "7 / 2", "-7 / 2", "1 / 3 + 1 / 6", "2 / 4",
+    "3.14 * 2", "0.1 + 0.2", "0.5 * 0.5", "10 / 4", "1 / 3 * 3",
+    "(1 / 3 + 1 / 3 + 1 / 3)", ".25 + .75", "100 / 7", "22 / 7",
+    # integer division / modulo
+    "7 // 2", "-7 // 2", "100 // 7", "100 % 7", "7 % -3", "-7 % 3",
+    # powers
+    "2 ^ 10", "2 ^ 0", "2 ^ -1", "(1 / 2) ^ 3", "(-3) ^ 3", "-3 ^ 2",
+    "10 ^ 20", "2 ^ 3 ^ 2", "(2 / 3) ^ -2",
+    # scientific + big
+    "1e3 + 1", "1.5e-2 * 4", "1000000000000000000 * 1000000000000000000",
+    "123456789012345678901234567890 + 1", "0",
 ]
 
 
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "--cases":
         for e in CURATED:
-            print(f"{e}\t{evaluate(e)}")
+            print(f"{e}\t{canon(evaluate(e))}")
         return
     if len(sys.argv) >= 3 and sys.argv[1] in ("--gen", "--gen-big"):
         big = sys.argv[1] == "--gen-big"
         n = int(sys.argv[2])
-        rng = random.Random(1337 if not big else 4242)  # deterministic corpus
-        emitted = 0
-        while emitted < n:
-            e = gen_big_expr(rng) if big else gen_expr(rng)
+        rng = random.Random(4242 if big else 1337)
+        out = 0
+        while out < n:
+            e = gen_big(rng) if big else gen(rng)
             try:
-                v = evaluate(e)
-            except ZeroDivisionError:
+                v = canon(evaluate(e))
+            except (ZeroDivisionError, ValueError):
                 continue
             print(f"{e}\t{v}")
-            emitted += 1
+            out += 1
         return
-    # single expression
-    print(evaluate(" ".join(sys.argv[1:])))
+    print(canon(evaluate(" ".join(sys.argv[1:]))))
 
 
 if __name__ == "__main__":

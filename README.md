@@ -88,10 +88,26 @@ which is the whole joke.
 
 ## Semantics
 
-**Arbitrary-precision** signed integers, division truncating toward zero,
-remainder taking the dividend's sign. Supports `+ - * / %`, parentheses, and
-unary minus with correct precedence. Division by zero is detected and reported
-(exit code 3).
+**Exact arbitrary-precision rationals.** Every number is a fraction `p/q` of two
+bignums, so `0.1 + 0.2` is exactly `0.3` and `1/3 * 3` is exactly `1`. Supports:
+
+| op | meaning | example |
+|----|---------|---------|
+| `+ - *` | exact | `0.1 + 0.2` → `0.3` |
+| `/` | exact division | `1 / 3` → `1/3`, `7 / 2` → `3.5` |
+| `//` | integer division (toward zero) | `7 // 2` → `3` |
+| `%` | remainder (sign of dividend) | `100 % 7` → `2` |
+| `^` | integer exponent (right-assoc) | `2 ^ 3 ^ 2` → `512`, `(1/2)^3` → `0.125` |
+
+Decimal (`3.14`) and scientific (`1.5e-2`) literals are read exactly. Output is
+canonical: an integer, a terminating decimal, or a reduced fraction `p/q`.
+Division by zero exits 3; non-integer exponents (e.g. `2^(1/2)`) await the
+function layer and exit 5.
+
+The four rational engines (C, Rust, Go, Java) build this on their gate-level
+bignum: `NAND → 64-bit ALU → bignum → rational`. The Bash engine stays a bounded
+64-bit *integer* gate engine — it agrees on whole-number results within 64 bits
+and is outvoted by the quorum on fractions or overflow.
 
 The four big engines (C, Rust, Go, Java) are genuinely unbounded. Each gate
 engine builds bignum arithmetic as a third layer **on top of** its 64-bit gate
@@ -145,10 +161,13 @@ services/serviced.sh stop
 ```sh
 make all                       # build the engines + the HTTP sidecar
 ./calc "2 * (3 + 4)"           # -> 14
-./calc --report "6 * 7"        # full JSON render (decimal/hex/binary/roman/words)
+./calc "1/3 + 1/6"             # -> 0.5
+./calc "0.1 + 0.2"             # -> 0.3   (exact, not 0.30000000000000004)
+./calc "2 ^ 100"               # -> 1267650600228229401496703205376
+./calc --report "1/3"          # full JSON render (value/exact/approx/roman/words)
 ./calc --service "6 * 7"       # same answer, but over an HTTP microservice mesh
 ./calc "1 / 0"; echo $?        # -> error on stderr, exit code 3
-bash tests/run_tests.sh        # 411 checks vs. an independent Python oracle
+bash tests/run_tests.sh        # 425 checks vs. an independent Python oracle
 ```
 
 ## Requirements
