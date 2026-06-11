@@ -229,7 +229,11 @@ public class Engine {
                     case "NEG": { Rat x = st.pop(); st.push(rat(x.num.negate(), x.den, x.inexact)); break; }
                     case "CONST": {
                         fpInit();
-                        st.push(ratFromFp(p[1].equals("pi") ? FP_PI : FP_E));
+                        BigInteger cv;
+                        if (p[1].equals("pi")) cv = FP_PI;
+                        else if (p[1].equals("e")) cv = FP_E;
+                        else { System.out.println("ERR:UNKNOWN"); return; }
+                        st.push(ratFromFp(cv));
                         break;
                     }
                     case "FUNC": {
@@ -249,7 +253,7 @@ public class Engine {
                                 if (x.signum() == 0) y = ZERO;
                                 else { boolean neg = x.signum() < 0; BigInteger r = fpExp(fpDivInt(fpLn(x.abs()), 3)); y = neg ? r.negate() : r; }
                                 break;
-                            default: st.push(a); continue;
+                            default: System.out.println("ERR:UNKNOWN"); return;
                         }
                         st.push(ratFromFp(y));
                         break;

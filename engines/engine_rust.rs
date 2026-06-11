@@ -607,7 +607,11 @@ fn main() {
             "NEG" => { let n = stack.len(); stack[n - 1].num.sign = -stack[n - 1].num.sign; }
             "CONST" => {
                 let c = fpc();
-                let v = if parts.next() == Some("pi") { &c.pi } else { &c.e };
+                let v = match parts.next() {
+                    Some("pi") => &c.pi,
+                    Some("e") => &c.e,
+                    _ => { println!("ERR:UNKNOWN"); return; }
+                };
                 stack.push(rat_from_fp(v));
             }
             "FUNC" => {
@@ -633,7 +637,7 @@ fn main() {
                         if x.sign == 0 { Big::zero() }
                         else { let mut ax = x.clone(); let neg = ax.sign < 0; ax.sign = 1; let mut y = fp_exp(&fp_div_int(&fp_ln(&ax, &c.scale, &c.ln2), 3), &c.scale); if neg { y.sign = -y.sign; } y }
                     }
-                    _ => { stack.push(a); continue; }
+                    _ => { println!("ERR:UNKNOWN"); return; }
                 };
                 stack.push(rat_from_fp(&y));
             }

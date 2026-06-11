@@ -663,7 +663,8 @@ int main(int argc, char **argv) {
             fp_init();
             Big v;
             if (!strcmp(operand, "pi")) big_copy(&FP_PI, &v);
-            else big_copy(&FP_E, &v);
+            else if (!strcmp(operand, "e")) big_copy(&FP_E, &v);
+            else { printf("ERR:UNKNOWN\n"); return 0; }
             rat_from_fp(&v, &stack[sp]); sp++;
         } else if (!strcmp(op, "FUNC")) {
             fp_init();
@@ -685,7 +686,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(operand, "cbrt")) {
                 if (X.sign == 0) big_zero(&Y);
                 else { Big ax; big_copy(&X, &ax); int neg = ax.sign < 0; ax.sign = 1; Big l, l3; fp_ln(&ax, &l); fp_div_int(&l, 3, &l3); fp_exp(&l3, &Y); if (neg) Y.sign = -Y.sign; }
-            } else { sp++; continue; }
+            } else { printf("ERR:UNKNOWN\n"); return 0; }
             if (dom) { printf("ERR:DOMAIN\n"); return 0; }
             rat_from_fp(&Y, &stack[sp]); sp++;
         } else {

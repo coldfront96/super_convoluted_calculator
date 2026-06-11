@@ -154,6 +154,10 @@ if [[ "$verdict" == "ERR:DOMAIN" ]]; then
     echo "Error: function argument outside its domain (e.g. sqrt/ln of a negative)." >&2
     exit 6
 fi
+if [[ "$verdict" == "ERR:UNKNOWN" ]]; then
+    echo "Error: unknown function or constant (supported: sqrt cbrt exp ln log sin cos tan abs, pi, e)." >&2
+    exit 7
+fi
 
 # ---- STAGE 6: render & cross-verify ----
 if [[ $SERVICE -eq 0 ]]; then

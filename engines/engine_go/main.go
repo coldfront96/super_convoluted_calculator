@@ -958,9 +958,15 @@ func main() {
 			stack[n-1].num.sign = -stack[n-1].num.sign
 		case "CONST":
 			c := fpc()
-			v := c.e
-			if parts[1] == "pi" {
+			var v Big
+			switch parts[1] {
+			case "pi":
 				v = c.pi
+			case "e":
+				v = c.e
+			default:
+				os.Stdout.WriteString("ERR:UNKNOWN\n")
+				return
 			}
 			stack = append(stack, ratFromFp(v))
 		case "FUNC":
@@ -1025,8 +1031,8 @@ func main() {
 					}
 				}
 			default:
-				stack = append(stack, a)
-				continue
+				os.Stdout.WriteString("ERR:UNKNOWN\n")
+				return
 			}
 			stack = append(stack, ratFromFp(y))
 		default:
