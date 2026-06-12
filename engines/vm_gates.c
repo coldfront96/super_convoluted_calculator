@@ -559,6 +559,37 @@ static void fp_tanh(const Big *x, Big *out) {
     fp_div(&nu, &de, out);
 }
 
+static void fp_asinh(const Big *x, Big *out) {        /* ln(x + sqrt(x^2+1)) */
+    Big x2, s, rt, a; fp_mul(x, x, &x2); big_add(&x2, &SCALE, &s); fp_sqrt(&s, &rt); big_add(x, &rt, &a); fp_ln(&a, out);
+}
+static int fp_acosh(const Big *x, Big *out) {        /* domain x >= 1 */
+    if (big_cmp(x, &SCALE) < 0) return 0;
+    Big x2, s, rt, a; fp_mul(x, x, &x2); big_sub(&x2, &SCALE, &s); fp_sqrt(&s, &rt); big_add(x, &rt, &a); fp_ln(&a, out); return 1;
+}
+static int fp_atanh_u(const Big *x, Big *out) {      /* 0.5*ln((1+x)/(1-x)), |x|<1 */
+    Big ax; big_copy(x, &ax); ax.sign = ax.n ? 1 : 0;
+    if (cmp_abs(&ax, &SCALE) >= 0) return 0;
+    Big num, den, q, l; big_add(&SCALE, x, &num); big_sub(&SCALE, x, &den); fp_div(&num, &den, &q); fp_ln(&q, &l); fp_div_int(&l, 2, out); return 1;
+}
+static int fp_logb(const Big *x, const Big *b, Big *out) {  /* log_b(x) */
+    if (x->sign <= 0 || b->sign <= 0) return 0;
+    Big lx, lb; fp_ln(x, &lx); fp_ln(b, &lb); if (lb.sign == 0) return 0; fp_div(&lx, &lb, out); return 1;
+}
+static void fp_hypot(const Big *x, const Big *y, Big *out) {
+    Big x2, y2, s; fp_mul(x, x, &x2); fp_mul(y, y, &y2); big_add(&x2, &y2, &s); fp_sqrt(&s, out);
+}
+static void fp_atan2(const Big *y, const Big *x, Big *out) {
+    if (x->sign > 0) { Big q; fp_div(y, x, &q); fp_atan(&q, out); return; }
+    if (x->sign < 0) {
+        Big q, a; fp_div(y, x, &q); fp_atan(&q, &a);
+        if (y->sign >= 0) big_add(&a, &FP_PI, out); else big_sub(&a, &FP_PI, out);
+        return;
+    }
+    if (y->sign > 0) { fp_div_int(&FP_PI, 2, out); return; }
+    if (y->sign < 0) { Big h; fp_div_int(&FP_PI, 2, &h); h.sign = -h.sign; big_copy(&h, out); return; }
+    big_zero(out);
+}
+
 static void fp_init(void) {
     if (FP_INIT) return; FP_INIT = 1;
     pow10(WP, &SCALE);
@@ -704,7 +735,8 @@ int main(int argc, char **argv) {
     while (fgets(line, sizeof line, f)) {
         char op[32];
         char operand[LIMBS * 10];
-        int nf = sscanf(line, "%31s %s", op, operand);
+        int argc = 0;
+        int nf = sscanf(line, "%31s %s %d", op, operand, &argc);
         if (nf < 1) continue;
 
         if (!strcmp(op, "PUSH")) {
@@ -718,6 +750,49 @@ int main(int argc, char **argv) {
             else if (!strcmp(operand, "e")) big_copy(&FP_E, &v);
             else { printf("ERR:UNKNOWN\n"); return 0; }
             rat_from_fp(&v, &stack[sp]); sp++;
+        } else if (!strcmp(op, "FUNC") && argc == 2) {
+            fp_init();
+            Rat b = stack[--sp];
+            Rat a = stack[--sp];
+            Rat res;
+            if (!strcmp(operand, "gcd") || !strcmp(operand, "lcm")) {
+                if (!big_is_one(&a.den) || !big_is_one(&b.den)) { printf("ERR:DOMAIN\n"); return 0; }
+                Big g; big_gcd(&a.num, &b.num, &g);
+                if (!strcmp(operand, "gcd")) { big_copy(&g, &res.num); big_one(&res.den); }
+                else if (a.num.sign == 0 || b.num.sign == 0) { big_zero(&res.num); big_one(&res.den); }
+                else { Big p; big_mul(&a.num, &b.num, &p); p.sign = p.n ? 1 : 0; Big q, r; big_divmod(&p, &g, &q, &r); big_copy(&q, &res.num); big_one(&res.den); }
+                res.inexact = a.inexact | b.inexact;
+            } else if (!strcmp(operand, "max") || !strcmp(operand, "min")) {
+                Big l, r2; big_mul(&a.num, &b.den, &l); big_mul(&b.num, &a.den, &r2);
+                int c = big_cmp(&l, &r2);
+                int pick_a = !strcmp(operand, "max") ? (c >= 0) : (c <= 0);
+                res = pick_a ? a : b;
+            } else if (!strcmp(operand, "comb") || !strcmp(operand, "perm")) {
+                Big cap; big_set_int(&cap, 20000);
+                if (!big_is_one(&a.den) || !big_is_one(&b.den) || a.num.sign < 0 || b.num.sign < 0 || big_cmp(&a.num, &cap) > 0) { printf("ERR:DOMAIN\n"); return 0; }
+                long nn = a.num.n == 0 ? 0 : (long)a.num.d[0];
+                long rr = b.num.n == 0 ? 0 : (long)b.num.d[0];
+                Big resv; big_one(&resv);
+                if (rr > nn) { big_zero(&resv); }
+                else {
+                    Big p; big_one(&p);
+                    for (long i = 0; i < rr; i++) { Big t1, t2; big_set_int(&t1, nn - i); big_mul(&p, &t1, &t2); big_copy(&t2, &p); }
+                    if (!strcmp(operand, "perm")) big_copy(&p, &resv);
+                    else { Big rf; big_one(&rf); for (long i = 2; i <= rr; i++) { Big t1, t2; big_set_int(&t1, i); big_mul(&rf, &t1, &t2); big_copy(&t2, &rf); } Big q, r; big_divmod(&p, &rf, &q, &r); big_copy(&q, &resv); }
+                }
+                big_copy(&resv, &res.num); big_one(&res.den); res.inexact = a.inexact | b.inexact;
+            } else {
+                Big A, B; fp_from_rat(&a.num, &a.den, &A); fp_from_rat(&b.num, &b.den, &B);
+                Big Y; int dom = 0;
+                if (!strcmp(operand, "log")) { if (!fp_logb(&A, &B, &Y)) dom = 1; }
+                else if (!strcmp(operand, "hypot")) fp_hypot(&A, &B, &Y);
+                else if (!strcmp(operand, "atan2")) fp_atan2(&A, &B, &Y);
+                else { printf("ERR:UNKNOWN\n"); return 0; }
+                if (dom) { printf("ERR:DOMAIN\n"); return 0; }
+                rat_from_fp(&Y, &res);
+            }
+            stack[sp] = res; sp++;
+            continue;
         } else if (!strcmp(op, "FUNC")) {
             fp_init();
             Rat a = stack[--sp];
@@ -751,6 +826,9 @@ int main(int argc, char **argv) {
             else if (!strcmp(operand, "sinh")) fp_sinh(&X, &Y);
             else if (!strcmp(operand, "cosh")) fp_cosh(&X, &Y);
             else if (!strcmp(operand, "tanh")) fp_tanh(&X, &Y);
+            else if (!strcmp(operand, "asinh")) fp_asinh(&X, &Y);
+            else if (!strcmp(operand, "acosh")) { if (!fp_acosh(&X, &Y)) dom = 1; }
+            else if (!strcmp(operand, "atanh")) { if (!fp_atanh_u(&X, &Y)) dom = 1; }
             else if (!strcmp(operand, "rad")) { Big k; fp_div_int(&FP_PI, 180, &k); fp_mul(&X, &k, &Y); }
             else if (!strcmp(operand, "deg")) { Big c180, one1, f180, t; big_set_int(&c180, 180); big_one(&one1); fp_from_rat(&c180, &one1, &f180); fp_mul(&X, &f180, &t); fp_div(&t, &FP_PI, &Y); }
             else if (!strcmp(operand, "cbrt")) {

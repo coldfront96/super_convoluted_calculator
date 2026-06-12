@@ -49,8 +49,8 @@ def emit(node, out)
   elsif node.key?('const')
     out << "CONST #{node['const']}"
   elsif node.key?('func')
-    emit(node['x'], out)
-    out << "FUNC #{node['func']}"
+    node['args'].each { |arg| emit(arg, out) }
+    out << "FUNC #{node['func']} #{node['args'].length}"
   elsif node['op'] == 'neg'
     emit(node['x'], out)
     out << 'NEG'

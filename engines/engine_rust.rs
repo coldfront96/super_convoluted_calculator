@@ -511,6 +511,41 @@ fn fp_tanh(x: &Big, s: &Big) -> Big {
     fp_div(&big_sub(&e1, &e2), &big_add(&e1, &e2), s)
 }
 
+fn fp_asinh(x: &Big, s: &Big, ln2: &Big) -> Big {
+    let rt = fp_sqrt(&big_add(&fp_mul(x, x, s), s), s);
+    fp_ln(&big_add(x, &rt), s, ln2)
+}
+fn fp_acosh(x: &Big, s: &Big, ln2: &Big) -> Option<Big> {
+    if big_cmp(x, s) < 0 { return None; }
+    let rt = fp_sqrt(&big_sub(&fp_mul(x, x, s), s), s);
+    Some(fp_ln(&big_add(x, &rt), s, ln2))
+}
+fn fp_atanh_u(x: &Big, s: &Big, ln2: &Big) -> Option<Big> {
+    let mut ax = x.clone(); ax.sign = if ax.d.is_empty() { 0 } else { 1 };
+    if cmp_abs(&ax, s) >= 0 { return None; }
+    let q = fp_div(&big_add(s, x), &big_sub(s, x), s);
+    Some(fp_div_int(&fp_ln(&q, s, ln2), 2))
+}
+fn fp_logb(x: &Big, b: &Big, s: &Big, ln2: &Big) -> Option<Big> {
+    if x.sign <= 0 || b.sign <= 0 { return None; }
+    let lb = fp_ln(b, s, ln2);
+    if lb.sign == 0 { return None; }
+    Some(fp_div(&fp_ln(x, s, ln2), &lb, s))
+}
+fn fp_hypot(x: &Big, y: &Big, s: &Big) -> Big {
+    fp_sqrt(&big_add(&fp_mul(x, x, s), &fp_mul(y, y, s)), s)
+}
+fn fp_atan2(y: &Big, x: &Big, s: &Big, pi: &Big) -> Big {
+    if x.sign > 0 { return fp_atan(&fp_div(y, x, s), s); }
+    if x.sign < 0 {
+        let a = fp_atan(&fp_div(y, x, s), s);
+        return if y.sign >= 0 { big_add(&a, pi) } else { big_sub(&a, pi) };
+    }
+    if y.sign > 0 { return fp_div_int(pi, 2); }
+    if y.sign < 0 { let mut h = fp_div_int(pi, 2); h.sign = -h.sign; return h; }
+    Big::zero()
+}
+
 fn build_fp() -> FP {
     let scale = pow10(WP);
     let pi = fp_parse_const(PI_STR, &scale);
@@ -664,6 +699,48 @@ fn main() {
             }
             "FUNC" => {
                 let name = parts.next().unwrap();
+                let fargc: usize = parts.next().map(|s| s.parse().unwrap()).unwrap_or(1);
+                if fargc == 2 {
+                    let c = fpc();
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    let res = match name {
+                        "gcd" | "lcm" => {
+                            if !big_is_one(&a.den) || !big_is_one(&b.den) { println!("ERR:DOMAIN"); return; }
+                            let g = big_gcd(&a.num, &b.num);
+                            let num = if name == "gcd" { g }
+                                else if a.num.sign == 0 || b.num.sign == 0 { Big::zero() }
+                                else { let mut p = big_mul(&a.num, &b.num); p.sign = if p.d.is_empty() { 0 } else { 1 }; big_divmod(&p, &g).unwrap().0 };
+                            Rat { num, den: big_one(), inexact: a.inexact || b.inexact }
+                        }
+                        "max" | "min" => {
+                            let c2 = big_cmp(&big_mul(&a.num, &b.den), &big_mul(&b.num, &a.den));
+                            let pick_a = if name == "max" { c2 >= 0 } else { c2 <= 0 };
+                            if pick_a { a } else { b }
+                        }
+                        "comb" | "perm" => {
+                            if !big_is_one(&a.den) || !big_is_one(&b.den) || a.num.sign < 0 || b.num.sign < 0 || big_cmp(&a.num, &big_set_int(20000)) > 0 { println!("ERR:DOMAIN"); return; }
+                            let nn: i64 = if a.num.d.is_empty() { 0 } else { a.num.d[0] as i64 };
+                            let rr: i64 = if b.num.d.is_empty() { 0 } else { b.num.d[0] as i64 };
+                            let num = if rr > nn { Big::zero() } else {
+                                let mut p = big_one();
+                                for i in 0..rr { p = big_mul(&p, &big_set_int(nn - i)); }
+                                if name == "perm" { p } else {
+                                    let mut rf = big_one();
+                                    for i in 2..=rr { rf = big_mul(&rf, &big_set_int(i)); }
+                                    big_divmod(&p, &rf).unwrap().0
+                                }
+                            };
+                            Rat { num, den: big_one(), inexact: a.inexact || b.inexact }
+                        }
+                        "log" => { match fp_logb(&fp_from_rat(&a.num, &a.den, &c.scale), &fp_from_rat(&b.num, &b.den, &c.scale), &c.scale, &c.ln2) { Some(v) => rat_from_fp(&v), None => { println!("ERR:DOMAIN"); return; } } }
+                        "hypot" => rat_from_fp(&fp_hypot(&fp_from_rat(&a.num, &a.den, &c.scale), &fp_from_rat(&b.num, &b.den, &c.scale), &c.scale)),
+                        "atan2" => rat_from_fp(&fp_atan2(&fp_from_rat(&a.num, &a.den, &c.scale), &fp_from_rat(&b.num, &b.den, &c.scale), &c.scale, &c.pi)),
+                        _ => { println!("ERR:UNKNOWN"); return; }
+                    };
+                    stack.push(res);
+                    continue;
+                }
                 let a = stack.pop().unwrap();
                 if name == "abs" {
                     let mut r = a.clone();
@@ -697,6 +774,9 @@ fn main() {
                     "sinh" => fp_sinh(&x, &c.scale),
                     "cosh" => fp_cosh(&x, &c.scale),
                     "tanh" => fp_tanh(&x, &c.scale),
+                    "asinh" => fp_asinh(&x, &c.scale, &c.ln2),
+                    "acosh" => match fp_acosh(&x, &c.scale, &c.ln2) { Some(v) => v, None => { println!("ERR:DOMAIN"); return; } },
+                    "atanh" => match fp_atanh_u(&x, &c.scale, &c.ln2) { Some(v) => v, None => { println!("ERR:DOMAIN"); return; } },
                     "rad" => fp_mul(&x, &fp_div_int(&c.pi, 180), &c.scale),
                     "deg" => { let f180 = fp_from_rat(&big_set_int(180), &big_one(), &c.scale); fp_div(&fp_mul(&x, &f180, &c.scale), &c.pi, &c.scale) }
                     "cbrt" => {

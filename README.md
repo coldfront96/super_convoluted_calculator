@@ -105,15 +105,19 @@ Division by zero exits 3; a function argument outside its domain exits 6.
 
 ### Functions (the irrational layer)
 
-Roots/exp/log `sqrt cbrt exp ln log/log10`; trig `sin cos tan`; inverse trig
-`asin acos atan`; hyperbolic `sinh cosh tanh`; degree conversion `rad deg`;
-`abs`; **exact** `fact` (factorial of a whole number); constants `pi` and `e`;
-and non-integer powers like `2^(1/2)`. Trig is in **radians** (use `rad(x)` to
-convert degrees, e.g. `sin(rad(30))` → `0.5`). Arbitrary-base log is `ln(x)/ln(b)`.
+One-argument: roots/exp/log `sqrt cbrt exp ln log/log10`; trig `sin cos tan`;
+inverse trig `asin acos atan`; hyperbolic `sinh cosh tanh`; inverse hyperbolic
+`asinh acosh atanh`; degree conversion `rad deg`; `abs`; **exact** `fact`.
 
-These can't be exact, so a value that passes through a function is tagged
-*inexact* and printed rounded to **50 significant digits**; pure rational results
-(and `abs`/`fact` of exact inputs) stay exact.
+Two-argument: **exact** `gcd lcm comb perm` (integers), exactness-preserving
+`max min`, and inexact `log(x,b)` (log base b), `hypot(x,y)`, `atan2(y,x)`.
+
+Constants `pi`, `e`; non-integer powers like `2^(1/2)`. Trig is in **radians**
+(use `rad(x)`, e.g. `sin(rad(30))` → `0.5`).
+
+A value that passes through a transcendental function is tagged *inexact* and
+printed rounded to **50 significant digits**; pure rational results — and
+`abs`/`fact`/`gcd`/`lcm`/`comb`/`perm`/`max`/`min` of exact inputs — stay exact.
 
 ```
 sqrt(2)            -> 1.4142135623730950488016887242096980785696718753769

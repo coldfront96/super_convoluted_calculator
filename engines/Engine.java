@@ -207,6 +207,19 @@ public class Engine {
     static BigInteger fpCosh(BigInteger x) { BigInteger e1 = fpExp(x), e2 = fpExp(x.negate()); return fpDivInt(e1.add(e2), 2); }
     static BigInteger fpTanh(BigInteger x) { BigInteger e1 = fpExp(x), e2 = fpExp(x.negate()); return fpDiv(e1.subtract(e2), e1.add(e2)); }
 
+    static BigInteger fpAsinh(BigInteger x) { return fpLn(x.add(fpSqrt(SCALE.add(fpMul(x, x))))); }
+    static BigInteger fpAcosh(BigInteger x) { if (x.compareTo(SCALE) < 0) return null; return fpLn(x.add(fpSqrt(fpMul(x, x).subtract(SCALE)))); }
+    static BigInteger fpAtanhU(BigInteger x) { if (x.abs().compareTo(SCALE) >= 0) return null; return fpDivInt(fpLn(fpDiv(SCALE.add(x), SCALE.subtract(x))), 2); }
+    static BigInteger fpLogb(BigInteger x, BigInteger b) { if (x.signum() <= 0 || b.signum() <= 0) return null; BigInteger lb = fpLn(b); if (lb.signum() == 0) return null; return fpDiv(fpLn(x), lb); }
+    static BigInteger fpHypot(BigInteger x, BigInteger y) { return fpSqrt(fpMul(x, x).add(fpMul(y, y))); }
+    static BigInteger fpAtan2(BigInteger y, BigInteger x) {
+        if (x.signum() > 0) return fpAtan(fpDiv(y, x));
+        if (x.signum() < 0) { BigInteger a = fpAtan(fpDiv(y, x)); return y.signum() >= 0 ? a.add(FP_PI) : a.subtract(FP_PI); }
+        if (y.signum() > 0) return FP_PI.divide(TWO);
+        if (y.signum() < 0) return FP_PI.divide(TWO).negate();
+        return ZERO;
+    }
+
     static void fpInit() {
         if (fpReady) return;
         fpReady = true;
@@ -275,6 +288,43 @@ public class Engine {
                         break;
                     }
                     case "FUNC": {
+                        if (p.length > 2 && p[2].equals("2")) {
+                            fpInit();
+                            Rat b = st.pop(), a = st.pop();
+                            Rat res;
+                            switch (p[1]) {
+                                case "gcd": case "lcm": {
+                                    if (!a.den.equals(ONE) || !b.den.equals(ONE)) { System.out.println("ERR:DOMAIN"); return; }
+                                    BigInteger g = a.num.gcd(b.num), num;
+                                    if (p[1].equals("gcd")) num = g;
+                                    else if (a.num.signum() == 0 || b.num.signum() == 0) num = ZERO;
+                                    else num = a.num.multiply(b.num).abs().divide(g);
+                                    res = rat(num, ONE, a.inexact || b.inexact); break;
+                                }
+                                case "max": case "min": {
+                                    int c = a.num.multiply(b.den).compareTo(b.num.multiply(a.den));
+                                    res = ((p[1].equals("max") && c >= 0) || (p[1].equals("min") && c <= 0)) ? a : b; break;
+                                }
+                                case "comb": case "perm": {
+                                    if (!a.den.equals(ONE) || !b.den.equals(ONE) || a.num.signum() < 0 || b.num.signum() < 0 || a.num.compareTo(BigInteger.valueOf(20000)) > 0) { System.out.println("ERR:DOMAIN"); return; }
+                                    long nn = a.num.longValueExact(), rr = b.num.longValueExact();
+                                    BigInteger num;
+                                    if (rr > nn) num = ZERO;
+                                    else {
+                                        BigInteger pp = ONE;
+                                        for (long i = 0; i < rr; i++) pp = pp.multiply(BigInteger.valueOf(nn - i));
+                                        if (p[1].equals("perm")) num = pp;
+                                        else { BigInteger rf = ONE; for (long i = 2; i <= rr; i++) rf = rf.multiply(BigInteger.valueOf(i)); num = pp.divide(rf); }
+                                    }
+                                    res = rat(num, ONE, a.inexact || b.inexact); break;
+                                }
+                                case "log": { BigInteger r = fpLogb(fpFromRat(a.num, a.den), fpFromRat(b.num, b.den)); if (r == null) { System.out.println("ERR:DOMAIN"); return; } res = ratFromFp(r); break; }
+                                case "hypot": res = ratFromFp(fpHypot(fpFromRat(a.num, a.den), fpFromRat(b.num, b.den))); break;
+                                case "atan2": res = ratFromFp(fpAtan2(fpFromRat(a.num, a.den), fpFromRat(b.num, b.den))); break;
+                                default: System.out.println("ERR:UNKNOWN"); return;
+                            }
+                            st.push(res); break;
+                        }
                         Rat a = st.pop();
                         if (p[1].equals("abs")) { st.push(rat(a.num.abs(), a.den, a.inexact)); break; }
                         if (p[1].equals("fact")) {
@@ -301,6 +351,9 @@ public class Engine {
                             case "sinh": y = fpSinh(x); break;
                             case "cosh": y = fpCosh(x); break;
                             case "tanh": y = fpTanh(x); break;
+                            case "asinh": y = fpAsinh(x); break;
+                            case "acosh": { BigInteger r = fpAcosh(x); if (r == null) { System.out.println("ERR:DOMAIN"); return; } y = r; break; }
+                            case "atanh": { BigInteger r = fpAtanhU(x); if (r == null) { System.out.println("ERR:DOMAIN"); return; } y = r; break; }
                             case "rad": y = fpMul(x, FP_PI.divide(BigInteger.valueOf(180))); break;
                             case "deg": { BigInteger f180 = fpFromRat(BigInteger.valueOf(180), ONE); y = fpDiv(fpMul(x, f180), FP_PI); break; }
                             case "cbrt":

@@ -155,7 +155,7 @@ if [[ "$verdict" == "ERR:DOMAIN" ]]; then
     exit 6
 fi
 if [[ "$verdict" == "ERR:UNKNOWN" ]]; then
-    echo "Error: unknown function or constant. Supported: sqrt cbrt exp ln log sin cos tan asin acos atan sinh cosh tanh rad deg fact abs, and pi, e." >&2
+    echo "Error: unknown function or constant. Supported 1-arg: sqrt cbrt exp ln log sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh rad deg fact abs; 2-arg: gcd lcm comb perm max min log hypot atan2; constants pi e." >&2
     exit 7
 fi
 

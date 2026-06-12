@@ -815,6 +815,60 @@ func fpTanh(x, s Big) Big {
 	return fpDiv(bigSub(e1, e2), bigAdd(e1, e2), s)
 }
 
+func fpAsinh(x, s, ln2 Big) Big { rt := fpSqrt(bigAdd(fpMul(x, x, s), s), s); return fpLn(bigAdd(x, rt), s, ln2) }
+func fpAcosh(x, s, ln2 Big) (Big, bool) {
+	if bigCmp(x, s) < 0 {
+		return Big{}, false
+	}
+	rt := fpSqrt(bigSub(fpMul(x, x, s), s), s)
+	return fpLn(bigAdd(x, rt), s, ln2), true
+}
+func fpAtanhU(x, s, ln2 Big) (Big, bool) {
+	ax := x
+	if len(ax.d) == 0 {
+		ax.sign = 0
+	} else {
+		ax.sign = 1
+	}
+	if cmpAbs(ax, s) >= 0 {
+		return Big{}, false
+	}
+	q := fpDiv(bigAdd(s, x), bigSub(s, x), s)
+	return fpDivInt(fpLn(q, s, ln2), 2), true
+}
+func fpLogb(x, b, s, ln2 Big) (Big, bool) {
+	if x.sign <= 0 || b.sign <= 0 {
+		return Big{}, false
+	}
+	lb := fpLn(b, s, ln2)
+	if lb.sign == 0 {
+		return Big{}, false
+	}
+	return fpDiv(fpLn(x, s, ln2), lb, s), true
+}
+func fpHypot(x, y, s Big) Big { return fpSqrt(bigAdd(fpMul(x, x, s), fpMul(y, y, s)), s) }
+func fpAtan2(y, x, s, pi Big) Big {
+	if x.sign > 0 {
+		return fpAtan(fpDiv(y, x, s), s)
+	}
+	if x.sign < 0 {
+		a := fpAtan(fpDiv(y, x, s), s)
+		if y.sign >= 0 {
+			return bigAdd(a, pi)
+		}
+		return bigSub(a, pi)
+	}
+	if y.sign > 0 {
+		return fpDivInt(pi, 2)
+	}
+	if y.sign < 0 {
+		h := fpDivInt(pi, 2)
+		h.sign = -h.sign
+		return h
+	}
+	return zero()
+}
+
 func buildFP() FP {
 	scale := pow10(WP)
 	pi := fpParseConst(PI_STR, scale)
@@ -1044,6 +1098,93 @@ func main() {
 			stack = append(stack, ratFromFp(v))
 		case "FUNC":
 			name := parts[1]
+			if len(parts) > 2 && parts[2] == "2" {
+				c := fpc()
+				n := len(stack)
+				b := stack[n-1]
+				a := stack[n-2]
+				stack = stack[:n-2]
+				var res Rat
+				switch name {
+				case "gcd", "lcm":
+					if !bigIsOne(a.den) || !bigIsOne(b.den) {
+						os.Stdout.WriteString("ERR:DOMAIN\n")
+						return
+					}
+					g := bigGcd(a.num, b.num)
+					var num Big
+					if name == "gcd" {
+						num = g
+					} else if a.num.sign == 0 || b.num.sign == 0 {
+						num = zero()
+					} else {
+						p := bigMul(a.num, b.num)
+						if len(p.d) == 0 {
+							p.sign = 0
+						} else {
+							p.sign = 1
+						}
+						q, _, _ := bigDivmod(p, g)
+						num = q
+					}
+					res = Rat{num, bigOne(), a.inexact || b.inexact}
+				case "max", "min":
+					c2 := bigCmp(bigMul(a.num, b.den), bigMul(b.num, a.den))
+					if (name == "max" && c2 >= 0) || (name == "min" && c2 <= 0) {
+						res = a
+					} else {
+						res = b
+					}
+				case "comb", "perm":
+					if !bigIsOne(a.den) || !bigIsOne(b.den) || a.num.sign < 0 || b.num.sign < 0 || bigCmp(a.num, bigSetInt(20000)) > 0 {
+						os.Stdout.WriteString("ERR:DOMAIN\n")
+						return
+					}
+					var nn, rr int64
+					if len(a.num.d) > 0 {
+						nn = int64(a.num.d[0])
+					}
+					if len(b.num.d) > 0 {
+						rr = int64(b.num.d[0])
+					}
+					var num Big
+					if rr > nn {
+						num = zero()
+					} else {
+						p := bigOne()
+						for i := int64(0); i < rr; i++ {
+							p = bigMul(p, bigSetInt(nn-i))
+						}
+						if name == "perm" {
+							num = p
+						} else {
+							rf := bigOne()
+							for i := int64(2); i <= rr; i++ {
+								rf = bigMul(rf, bigSetInt(i))
+							}
+							q, _, _ := bigDivmod(p, rf)
+							num = q
+						}
+					}
+					res = Rat{num, bigOne(), a.inexact || b.inexact}
+				case "log":
+					v, ok := fpLogb(fpFromRat(a.num, a.den, c.scale), fpFromRat(b.num, b.den, c.scale), c.scale, c.ln2)
+					if !ok {
+						os.Stdout.WriteString("ERR:DOMAIN\n")
+						return
+					}
+					res = ratFromFp(v)
+				case "hypot":
+					res = ratFromFp(fpHypot(fpFromRat(a.num, a.den, c.scale), fpFromRat(b.num, b.den, c.scale), c.scale))
+				case "atan2":
+					res = ratFromFp(fpAtan2(fpFromRat(a.num, a.den, c.scale), fpFromRat(b.num, b.den, c.scale), c.scale, c.pi))
+				default:
+					os.Stdout.WriteString("ERR:UNKNOWN\n")
+					return
+				}
+				stack = append(stack, res)
+				continue
+			}
 			n := len(stack)
 			a := stack[n-1]
 			stack = stack[:n-1]
@@ -1129,6 +1270,22 @@ func main() {
 				y = fpCosh(x, c.scale)
 			case "tanh":
 				y = fpTanh(x, c.scale)
+			case "asinh":
+				y = fpAsinh(x, c.scale, c.ln2)
+			case "acosh":
+				v, ok := fpAcosh(x, c.scale, c.ln2)
+				if !ok {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = v
+			case "atanh":
+				v, ok := fpAtanhU(x, c.scale, c.ln2)
+				if !ok {
+					os.Stdout.WriteString("ERR:DOMAIN\n")
+					return
+				}
+				y = v
 			case "rad":
 				y = fpMul(x, fpDivInt(c.pi, 180), c.scale)
 			case "deg":

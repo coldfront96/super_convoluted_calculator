@@ -18,22 +18,25 @@
 import sys
 import os
 import re
+import math
 import random
 from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from funcs import (call_func, const, pow_inexact, round_sig_fraction,
+from funcs import (call_func, call_func2, const, pow_inexact, round_sig_fraction,
                    DomainError, OUT_SIG)
 
-FUNCS = {"sqrt", "cbrt", "exp", "ln", "log", "log10", "sin", "cos", "tan",
-         "asin", "acos", "atan", "sinh", "cosh", "tanh", "rad", "deg",
-         "fact", "abs"}
+FUNCS1 = {"sqrt", "cbrt", "exp", "ln", "log10", "sin", "cos", "tan",
+          "asin", "acos", "atan", "sinh", "cosh", "tanh",
+          "asinh", "acosh", "atanh", "rad", "deg", "fact", "abs"}
+FUNCS2 = {"gcd", "lcm", "max", "min", "comb", "perm", "hypot", "atan2"}
+FUNCS = FUNCS1 | FUNCS2 | {"log", "log10"}      # log is 1-or-2-arg
 CONSTS = {"pi", "e"}
 
 TOKEN = re.compile(
     r"\s*(//|[A-Za-z][A-Za-z0-9]*"
     r"|[0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?|\.[0-9]+(?:[eE][+-]?[0-9]+)?"
-    r"|[-+*/%()^])"
+    r"|[-+*/%()^,])"
 )
 
 
@@ -74,6 +77,64 @@ def trunc_div(a, b):
     if (a < 0) != (b < 0):
         q = -q
     return Fraction(q)
+
+
+def _int_of(v):
+    if v.f.denominator != 1:
+        raise DomainError
+    return v.f.numerator
+
+
+def apply_func(name, args):
+    n = len(args)
+    if name == "abs":
+        if n != 1:
+            raise ValueError("abs/1")
+        return V(abs(args[0].f), args[0].x)
+    if name == "fact":
+        if n != 1:
+            raise ValueError("fact/1")
+        m = args[0].f
+        if m.denominator != 1 or m < 0 or m.numerator > 20000:
+            raise DomainError
+        r = 1
+        for i in range(2, m.numerator + 1):
+            r *= i
+        return V(Fraction(r), args[0].x)
+    if name in ("gcd", "lcm", "comb", "perm"):
+        if n != 2:
+            raise ValueError(f"{name}/2")
+        a, b = _int_of(args[0]), _int_of(args[1])
+        ex = args[0].x or args[1].x
+        if name == "gcd":
+            return V(Fraction(math.gcd(abs(a), abs(b))), ex)
+        if name == "lcm":
+            v = 0 if (a == 0 or b == 0) else abs(a * b) // math.gcd(a, b)
+            return V(Fraction(v), ex)
+        if a < 0 or b < 0:
+            raise DomainError
+        return V(Fraction(math.comb(a, b) if name == "comb" else math.perm(a, b)), ex)
+    if name in ("max", "min"):
+        if n != 2:
+            raise ValueError(f"{name}/2")
+        if name == "max":
+            return args[0] if args[0].f >= args[1].f else args[1]
+        return args[0] if args[0].f <= args[1].f else args[1]
+    if name in ("hypot", "atan2"):
+        if n != 2:
+            raise ValueError(f"{name}/2")
+        return V(call_func2(name, args[0].f, args[1].f), True)
+    if name == "log":
+        if n == 1:
+            return V(call_func("log10", args[0].f), True)
+        if n == 2:
+            return V(call_func2("log", args[0].f, args[1].f), True)
+        raise ValueError("log/1-2")
+    if n != 1:
+        raise ValueError(f"{name}/1")
+    if name not in FUNCS1:
+        raise ValueError(f"unknown function {name}")
+    return V(call_func(name, args[0].f), True)
 
 
 class Parser:
@@ -165,22 +226,14 @@ class Parser:
             name = self.nxt()
             if self.peek() == "(":
                 self.nxt()
-                arg = self.expr()
+                args = [self.expr()]
+                while self.peek() == ",":
+                    self.nxt()
+                    args.append(self.expr())
                 if self.peek() != ")":
                     raise ValueError("missing )")
                 self.nxt()
-                if name == "abs":
-                    return V(abs(arg.f), arg.x)   # abs preserves exactness
-                if name == "fact":                # exact factorial of a whole number
-                    if arg.f.denominator != 1 or arg.f < 0 or arg.f.numerator > 20000:
-                        raise DomainError
-                    r = 1
-                    for i in range(2, arg.f.numerator + 1):
-                        r *= i
-                    return V(Fraction(r), arg.x)
-                if name not in FUNCS:
-                    raise ValueError(f"unknown function {name}")
-                return V(call_func("log10" if name == "log" else name, arg.f), True)
+                return apply_func(name, args)
             if name in CONSTS:
                 return V(const(name), True)
             raise ValueError(f"unknown name {name}")
@@ -269,17 +322,30 @@ def gen_fn_arg(rng):
 def gen_fn(rng, depth=0):
     if depth >= 2 or rng.random() < 0.5:
         kind = rng.random()
-        if kind < 0.4:
+        if kind < 0.3:
             fn = rng.choice(["sqrt", "exp", "ln", "log", "sin", "cos", "tan", "cbrt",
-                             "atan", "sinh", "cosh", "tanh", "rad", "deg"])
+                             "atan", "sinh", "cosh", "tanh", "rad", "deg", "asinh"])
             return f"{fn}({gen_fn_arg(rng)})"
-        if kind < 0.5:
-            fn = rng.choice(["asin", "acos"])
+        if kind < 0.4:
+            fn = rng.choice(["asin", "acos", "atanh"])         # arg in (-1, 1)
             sign = "-" if rng.random() < 0.3 else ""
             return f"{fn}({sign}0.{rng.randint(0, 999):03d})"
-        if kind < 0.58:
+        if kind < 0.46:
+            return f"acosh(1.{rng.randint(0, 999):03d})"        # arg >= 1
+        if kind < 0.52:
             return f"fact({rng.randint(0, 12)})"
-        if kind < 0.68:
+        if kind < 0.68:                                         # 2-arg exact
+            fn = rng.choice(["gcd", "lcm", "comb", "perm", "max", "min"])
+            if fn in ("comb", "perm"):
+                nn = rng.randint(0, 12)
+                return f"{fn}({nn},{rng.randint(0, nn)})"
+            return f"{fn}({rng.randint(0, 99)},{rng.randint(1, 99)})"
+        if kind < 0.8:                                          # 2-arg inexact
+            fn = rng.choice(["hypot", "atan2", "log"])
+            if fn == "log":
+                return f"log({rng.randint(2, 99)},{rng.randint(2, 9)})"
+            return f"{fn}({rng.randint(1, 20)},{rng.randint(1, 20)})"
+        if kind < 0.9:
             return rng.choice(["pi", "e"])
         return gen_fn_arg(rng)
     op = rng.choice(["+", "-", "*", "/"])
@@ -306,6 +372,12 @@ CURATED = [
     "sinh(0)", "cosh(0)", "tanh(0)", "cosh(1)", "tanh(2)",
     "fact(0)", "fact(1)", "fact(5)", "fact(10)", "fact(20)",
     "rad(180)", "deg(pi)", "sin(rad(30))", "cos(rad(60))", "deg(atan(1))",
+    # ---- Core++ functions ----
+    "asinh(0)", "asinh(1)", "acosh(1)", "acosh(2)", "atanh(0)", "atanh(0.5)",
+    "sinh(asinh(2))", "gcd(12, 18)", "gcd(0, 5)", "lcm(4, 6)", "lcm(0, 7)",
+    "max(3, 7)", "min(3, 7)", "max(1/2, 1/3)", "min(sqrt(2), 2)",
+    "comb(5, 2)", "comb(10, 0)", "comb(10, 11)", "perm(5, 2)", "perm(5, 0)",
+    "log(8, 2)", "log(1000, 10)", "hypot(3, 4)", "atan2(1, 1) * 4", "atan2(0, -1)",
 ]
 
 

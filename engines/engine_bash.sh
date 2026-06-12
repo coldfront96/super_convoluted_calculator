@@ -75,7 +75,7 @@ file="${1:-/dev/stdin}"
 declare -a S=()
 sp=0
 
-while read -r op v; do
+while read -r op v w; do
     [[ -z "$op" ]] && continue
     case "$op" in
         PUSH)
@@ -93,7 +93,7 @@ while read -r op v; do
         # This bounded 64-bit engine can't do constants or transcendentals; it
         # keeps the stack depth correct and lets the quorum outvote it.
         CONST) S[sp]=0; sp=$((sp + 1)) ;;
-        FUNC)  S[sp - 1]=0 ;;
+        FUNC)  cnt=${w:-1}; sp=$((sp - cnt)); S[sp]=0; sp=$((sp + 1)) ;;
         *)
             b=${S[sp - 1]}; a=${S[sp - 2]}; sp=$((sp - 2))
             res=0

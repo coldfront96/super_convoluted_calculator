@@ -163,7 +163,38 @@ def _func_dec(name: str, x: Decimal) -> Decimal:
         return x * PI / 180
     if name == "deg":
         return x * 180 / PI
+    if name == "asinh":
+        return (x + (x * x + 1).sqrt()).ln()
+    if name == "acosh":
+        if x < 1:
+            raise DomainError
+        return (x + (x * x - 1).sqrt()).ln()
+    if name == "atanh":
+        if x <= -1 or x >= 1:
+            raise DomainError
+        return ((1 + x) / (1 - x)).ln() / 2
     raise ValueError("unknown function " + name)
+
+
+def _func2_dec(name: str, a: Decimal, b: Decimal) -> Decimal:
+    if name == "log":                 # log_b(a) = ln(a)/ln(b)
+        if a <= 0 or b <= 0 or b == 1:
+            raise DomainError
+        return a.ln() / b.ln()
+    if name == "hypot":
+        return (a * a + b * b).sqrt()
+    if name == "atan2":               # a = y, b = x
+        if b > 0:
+            return _atan_dec(a / b)
+        if b < 0:
+            r = _atan_dec(a / b)
+            return r + PI if a >= 0 else r - PI
+        if a > 0:
+            return PI / 2
+        if a < 0:
+            return -PI / 2
+        return Decimal(0)
+    raise ValueError("unknown 2-arg function " + name)
 
 
 def call_func(name: str, arg: Fraction) -> Fraction:
@@ -171,6 +202,13 @@ def call_func(name: str, arg: Fraction) -> Fraction:
     with localcontext() as ctx:
         ctx.prec = 120
         d = _func_dec(name, _to_dec(arg))
+        return round_sig_fraction(Fraction(d), FUNC_SIG)
+
+
+def call_func2(name: str, fa: Fraction, fb: Fraction) -> Fraction:
+    with localcontext() as ctx:
+        ctx.prec = 120
+        d = _func2_dec(name, _to_dec(fa), _to_dec(fb))
         return round_sig_fraction(Fraction(d), FUNC_SIG)
 
 

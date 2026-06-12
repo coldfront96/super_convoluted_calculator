@@ -16,7 +16,7 @@ $src = '' unless defined $src;
 my %SYM = (
     '+' => 'PLUS',  '-' => 'MINUS', '*' => 'STAR',
     '/' => 'SLASH', '%' => 'PERCENT', '^' => 'CARET',
-    '(' => 'LPAREN', ')' => 'RPAREN',
+    '(' => 'LPAREN', ')' => 'RPAREN', ',' => 'COMMA',
 );
 
 print "idx,type,value\n";
@@ -31,7 +31,7 @@ while ($src =~ m{
         | [A-Za-z][A-Za-z0-9]*                             # sqrt, sin, pi, e ...
         | [0-9]+\.?[0-9]*(?:[eE][+-]?[0-9]+)?              # 12, 3.14, 1e9, 2.5e-3
         | \.[0-9]+(?:[eE][+-]?[0-9]+)?                     # .5, .25e3
-        | [-+*/%()^] )
+        | [-+*/%()^,] )
     }gcx) {
     my $tok = $1;
     if ($tok =~ /^[0-9.]/) {

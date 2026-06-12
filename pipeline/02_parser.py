@@ -88,9 +88,12 @@ def main() -> None:
             name = advance()[1]
             if peek() == "LPAREN":
                 advance()
-                arg = parse_expr()
+                args = [parse_expr()]
+                while peek() == "COMMA":
+                    advance()
+                    args.append(parse_expr())
                 expect("RPAREN")
-                return {"func": name, "x": arg}
+                return {"func": name, "args": args}
             return {"const": name}
         sys.exit(f"parse error: unexpected token {tp}")
 
