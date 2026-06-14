@@ -5,3 +5,5 @@ build/
 .services/
 engines/engine_go/engine_go
 services/sidecar/sidecar
+__pycache__/
+*.pyc
